@@ -1,4 +1,7 @@
 # DebugAndroidFramework
+
+说明：调试Android Framework的Java部分代码，以调试源码android-28为例，需要一个API 28的模拟器配合使用。
+
 一、下载源码
 
 下载源码方式很多，由于调试Framework只需要java代码即可，这里使用Android Studio的SDK Manager下载，以下载android-28为例
@@ -38,6 +41,8 @@
 ![](image/debug_source.jpg)
 
 
+
+更多请参考[极客时间-Android开发高手课](https://time.geekbang.org/column/article/85425)
 
 
 
