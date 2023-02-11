@@ -40,7 +40,7 @@
 
 ![](image/debug_source.jpg)
 
-七、重要提示：最新源代码更新至android-32
+七、重要提示：最新源代码更新至android-33
 
 ![](image/android_33_debug.jpg)
 
