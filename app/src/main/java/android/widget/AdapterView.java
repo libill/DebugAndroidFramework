@@ -18,8 +18,10 @@ package android.widget;
 
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.content.Context;
 import android.database.DataSetObserver;
+import android.os.Build;
 import android.os.Parcelable;
 import android.os.SystemClock;
 import android.util.AttributeSet;
@@ -68,6 +70,7 @@ public abstract class AdapterView<T extends Adapter> extends ViewGroup {
      * The position of the first child displayed
      */
     @ViewDebug.ExportedProperty(category = "scrolling")
+    @UnsupportedAppUsage
     int mFirstPosition = 0;
 
     /**
@@ -79,6 +82,7 @@ public abstract class AdapterView<T extends Adapter> extends ViewGroup {
     /**
      * Position from which to start looking for mSyncRowId
      */
+    @UnsupportedAppUsage
     int mSyncPosition;
 
     /**
@@ -94,6 +98,7 @@ public abstract class AdapterView<T extends Adapter> extends ViewGroup {
     /**
      * True if we need to sync to mSyncRowId
      */
+    @UnsupportedAppUsage
     boolean mNeedSync = false;
 
     /**
@@ -131,11 +136,13 @@ public abstract class AdapterView<T extends Adapter> extends ViewGroup {
     /**
      * The listener that receives notifications when an item is selected.
      */
+    @UnsupportedAppUsage
     OnItemSelectedListener mOnItemSelectedListener;
 
     /**
      * The listener that receives notifications when an item is clicked.
      */
+    @UnsupportedAppUsage
     OnItemClickListener mOnItemClickListener;
 
     /**
@@ -146,6 +153,7 @@ public abstract class AdapterView<T extends Adapter> extends ViewGroup {
     /**
      * True if the data has changed since the last layout
      */
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 123768524)
     boolean mDataChanged;
 
     /**
@@ -153,17 +161,20 @@ public abstract class AdapterView<T extends Adapter> extends ViewGroup {
      * during the next layout.
      */
     @ViewDebug.ExportedProperty(category = "list")
+    @UnsupportedAppUsage
     int mNextSelectedPosition = INVALID_POSITION;
 
     /**
      * The item id of the item to select during the next layout.
      */
+    @UnsupportedAppUsage
     long mNextSelectedRowId = INVALID_ROW_ID;
 
     /**
      * The position within the adapter's data set of the currently selected item.
      */
     @ViewDebug.ExportedProperty(category = "list")
+    @UnsupportedAppUsage
     int mSelectedPosition = INVALID_POSITION;
 
     /**
@@ -201,6 +212,7 @@ public abstract class AdapterView<T extends Adapter> extends ViewGroup {
     /**
      * The last selected position we used when notifying
      */
+    @UnsupportedAppUsage
     int mOldSelectedPosition = INVALID_POSITION;
 
     /**
@@ -293,7 +305,7 @@ public abstract class AdapterView<T extends Adapter> extends ViewGroup {
 
     /**
      * @return The callback to be invoked with an item in this AdapterView has
-     *         been clicked, or null id no callback has been set.
+     *         been clicked, or null if no callback has been set.
      */
     @Nullable
     public final OnItemClickListener getOnItemClickListener() {
@@ -365,7 +377,7 @@ public abstract class AdapterView<T extends Adapter> extends ViewGroup {
 
     /**
      * @return The callback to be invoked with an item in this AdapterView has
-     *         been clicked and held, or null id no callback as been set.
+     *         been clicked and held, or null if no callback has been set.
      */
     public final OnItemLongClickListener getOnItemLongClickListener() {
         return mOnItemLongClickListener;
@@ -671,7 +683,7 @@ public abstract class AdapterView<T extends Adapter> extends ViewGroup {
 
     /**
      * Sets the currently selected item. To support accessibility subclasses that
-     * override this method must invoke the overriden super method first.
+     * override this method must invoke the overridden super method first.
      *
      * @param position Index (starting at 0) of the data item to be selected.
      */
@@ -900,6 +912,7 @@ public abstract class AdapterView<T extends Adapter> extends ViewGroup {
         }
     }
 
+    @UnsupportedAppUsage
     void selectionChanged() {
         // We're about to post or run the selection notifier, so we don't need
         // a pending notifier.
@@ -1217,6 +1230,7 @@ public abstract class AdapterView<T extends Adapter> extends ViewGroup {
      * Utility to keep mSelectedPosition and mSelectedRowId in sync
      * @param position Our current position
      */
+    @UnsupportedAppUsage
     void setSelectedPositionInt(int position) {
         mSelectedPosition = position;
         mSelectedRowId = getItemIdAtPosition(position);
@@ -1227,6 +1241,7 @@ public abstract class AdapterView<T extends Adapter> extends ViewGroup {
      * @param position Intended value for mSelectedPosition the next time we go
      * through layout
      */
+    @UnsupportedAppUsage
     void setNextSelectedPositionInt(int position) {
         mNextSelectedPosition = position;
         mNextSelectedRowId = getItemIdAtPosition(position);
@@ -1295,13 +1310,23 @@ public abstract class AdapterView<T extends Adapter> extends ViewGroup {
     @Override
     public void onProvideAutofillStructure(ViewStructure structure, int flags) {
         super.onProvideAutofillStructure(structure, flags);
+    }
 
-        final Adapter adapter = getAdapter();
-        if (adapter == null) return;
+    /** @hide */
+    @Override
+    protected void onProvideStructure(@NonNull ViewStructure structure,
+            @ViewStructureType int viewFor, int flags) {
+        super.onProvideStructure(structure, viewFor, flags);
 
-        final CharSequence[] options = adapter.getAutofillOptions();
-        if (options != null) {
-            structure.setAutofillOptions(options);
+        if (viewFor == VIEW_STRUCTURE_FOR_AUTOFILL
+                || viewFor == VIEW_STRUCTURE_FOR_CONTENT_CAPTURE) {
+            final Adapter adapter = getAdapter();
+            if (adapter == null) return;
+
+            final CharSequence[] options = adapter.getAutofillOptions();
+            if (options != null) {
+                structure.setAutofillOptions(options);
+            }
         }
     }
 }

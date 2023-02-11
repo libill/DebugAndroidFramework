@@ -16,6 +16,8 @@
 
 package com.android.server;
 
+import static android.system.OsConstants.O_RDONLY;
+
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -23,41 +25,42 @@ import android.content.pm.IPackageManager;
 import android.os.Build;
 import android.os.DropBoxManager;
 import android.os.Environment;
-import android.os.FileObserver;
 import android.os.FileUtils;
+import android.os.MessageQueue.OnFileDescriptorEventListener;
 import android.os.RecoverySystem;
 import android.os.RemoteException;
 import android.os.ServiceManager;
 import android.os.SystemProperties;
-import android.os.storage.StorageManager;
 import android.provider.Downloads;
+import android.system.ErrnoException;
+import android.system.Os;
 import android.text.TextUtils;
 import android.util.AtomicFile;
 import android.util.EventLog;
 import android.util.Slog;
-import android.util.StatsLog;
+import android.util.TypedXmlPullParser;
+import android.util.TypedXmlSerializer;
 import android.util.Xml;
 
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.logging.MetricsLogger;
-import com.android.internal.util.FastXmlSerializer;
+import com.android.internal.util.FrameworkStatsLog;
 import com.android.internal.util.XmlUtils;
-import com.android.server.DropboxLogTags;
+import com.android.server.am.DropboxRateLimiter;
+
+import org.xmlpull.v1.XmlPullParser;
+import org.xmlpull.v1.XmlPullParserException;
 
 import java.io.File;
+import java.io.FileDescriptor;
 import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.FileNotFoundException;
-import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-
-import org.xmlpull.v1.XmlPullParser;
-import org.xmlpull.v1.XmlPullParserException;
-import org.xmlpull.v1.XmlSerializer;
 
 /**
  * Performs a number of miscellaneous, non-system-critical actions
@@ -66,13 +69,18 @@ import org.xmlpull.v1.XmlSerializer;
 public class BootReceiver extends BroadcastReceiver {
     private static final String TAG = "BootReceiver";
 
+    private static final String TAG_TRUNCATED = "[[TRUNCATED]]\n";
+
     // Maximum size of a logged event (files get truncated if they're longer).
     // Give userdebug builds a larger max to capture extra debug, esp. for last_kmsg.
     private static final int LOG_SIZE =
         SystemProperties.getInt("ro.debuggable", 0) == 1 ? 98304 : 65536;
+    private static final int LASTK_LOG_SIZE =
+        SystemProperties.getInt("ro.debuggable", 0) == 1 ? 196608 : 65536;
+    private static final int GMSCORE_LASTK_LOG_SIZE = 196608;
 
-    private static final File TOMBSTONE_DIR = new File("/data/tombstones");
     private static final String TAG_TOMBSTONE = "SYSTEM_TOMBSTONE";
+    private static final String TAG_TOMBSTONE_PROTO = "SYSTEM_TOMBSTONE_PROTO";
 
     // The pre-froyo package and class of the system updater, which
     // ran in the system process.  We need to remove its packages here
@@ -81,9 +89,6 @@ public class BootReceiver extends BroadcastReceiver {
         "com.google.android.systemupdater";
     private static final String OLD_UPDATER_CLASS =
         "com.google.android.systemupdater.SystemUpdateReceiver";
-
-    // Keep a reference to the observer so the finalizer doesn't disable it.
-    private static FileObserver sTombstoneObserver = null;
 
     private static final String LOG_FILES_FILE = "log-files.xml";
     private static final AtomicFile sFile = new AtomicFile(new File(
@@ -117,6 +122,13 @@ public class BootReceiver extends BroadcastReceiver {
     private static final String METRIC_SYSTEM_SERVER = "shutdown_system_server";
     private static final String METRIC_SHUTDOWN_TIME_START = "begin_shutdown";
 
+    // Location of ftrace pipe for notifications from kernel memory tools like KFENCE and KASAN.
+    private static final String ERROR_REPORT_TRACE_PIPE =
+            "/sys/kernel/tracing/instances/bootreceiver/trace_pipe";
+    // Stop after sending too many reports. See http://b/182159975.
+    private static final int MAX_ERROR_REPORTS = 8;
+    private static int sSentReports = 0;
+
     @Override
     public void onReceive(final Context context, Intent intent) {
         // Log boot events in the background to avoid blocking the main thread with I/O
@@ -144,13 +156,69 @@ public class BootReceiver extends BroadcastReceiver {
 
             }
         }.start();
+
+        FileDescriptor tracefd = null;
+        try {
+            tracefd = Os.open(ERROR_REPORT_TRACE_PIPE, O_RDONLY, 0600);
+        } catch (ErrnoException e) {
+            Slog.wtf(TAG, "Could not open " + ERROR_REPORT_TRACE_PIPE, e);
+            return;
+        }
+
+        /*
+         * Event listener to watch for memory tool error reports.
+         * We read from /sys/kernel/tracing/instances/bootreceiver/trace_pipe (set up by the
+         * system), which will print an ftrace event when a memory corruption is detected in the
+         * kernel.
+         * When an error is detected, we set the dmesg.start system property to notify dmesgd
+         * about a new error.
+         */
+        OnFileDescriptorEventListener traceCallback = new OnFileDescriptorEventListener() {
+            final int mBufferSize = 1024;
+            byte[] mTraceBuffer = new byte[mBufferSize];
+            @Override
+            public int onFileDescriptorEvents(FileDescriptor fd, int events) {
+                /*
+                 * Read from the tracing pipe set up to monitor the error_report_end events.
+                 * When a tracing event occurs, the kernel writes a short (~100 bytes) line to the
+                 * pipe, e.g.:
+                 *   ...-11210  [004] d..1   285.322307: error_report_end: [kfence] ffffff8938a05000
+                 * The buffer size we use for reading should be enough to read the whole
+                 * line, but to be on the safe side we keep reading until the buffer
+                 * contains a '\n' character. In the unlikely case of a very buggy kernel
+                 * the buffer may contain multiple tracing events that cannot be attributed
+                 * to particular error reports. dmesgd will take care of all errors.
+                 */
+                try {
+                    int nbytes = Os.read(fd, mTraceBuffer, 0, mBufferSize);
+                    if (nbytes > 0) {
+                        String readStr = new String(mTraceBuffer);
+                        if (readStr.indexOf("\n") == -1) {
+                            return OnFileDescriptorEventListener.EVENT_INPUT;
+                        }
+                        if (sSentReports < MAX_ERROR_REPORTS) {
+                            SystemProperties.set("dmesgd.start", "1");
+                            sSentReports++;
+                        }
+                    }
+                } catch (Exception e) {
+                    Slog.wtf(TAG, "Error watching for trace events", e);
+                    return 0;  // Unregister the handler.
+                }
+                return OnFileDescriptorEventListener.EVENT_INPUT;
+            }
+        };
+
+        IoThread.get().getLooper().getQueue().addOnFileDescriptorEventListener(
+                tracefd, OnFileDescriptorEventListener.EVENT_INPUT, traceCallback);
+
     }
 
     private void removeOldUpdatePackages(Context context) {
         Downloads.removeAllDownloadsByPackage(context, OLD_UPDATER_PACKAGE, OLD_UPDATER_CLASS);
     }
 
-    private String getPreviousBootHeaders() {
+    private static String getPreviousBootHeaders() {
         try {
             return FileUtils.readTextFile(lastHeaderFile, 0, null);
         } catch (IOException e) {
@@ -158,7 +226,7 @@ public class BootReceiver extends BroadcastReceiver {
         }
     }
 
-    private String getCurrentBootHeaders() throws IOException {
+    private static String getCurrentBootHeaders() throws IOException {
         return new StringBuilder(512)
             .append("Build: ").append(Build.FINGERPRINT).append("\n")
             .append("Hardware: ").append(Build.BOARD).append("\n")
@@ -172,7 +240,7 @@ public class BootReceiver extends BroadcastReceiver {
     }
 
 
-    private String getBootHeadersToLogAndUpdate() throws IOException {
+    private static String getBootHeadersToLogAndUpdate() throws IOException {
         final String oldHeaders = getPreviousBootHeaders();
         final String newHeaders = getCurrentBootHeaders();
 
@@ -213,23 +281,17 @@ public class BootReceiver extends BroadcastReceiver {
         HashMap<String, Long> timestamps = readTimestamps();
 
         if (SystemProperties.getLong("ro.runtime.firstboot", 0) == 0) {
-            if (StorageManager.inCryptKeeperBounce()) {
-                // Encrypted, first boot to get PIN/pattern/password so data is tmpfs
-                // Don't set ro.runtime.firstboot so that we will do this again
-                // when data is properly mounted
-            } else {
-                String now = Long.toString(System.currentTimeMillis());
-                SystemProperties.set("ro.runtime.firstboot", now);
-            }
+            String now = Long.toString(System.currentTimeMillis());
+            SystemProperties.set("ro.runtime.firstboot", now);
             if (db != null) db.addText("SYSTEM_BOOT", headers);
 
             // Negative sizes mean to take the *tail* of the file (see FileUtils.readTextFile())
-            addFileWithFootersToDropBox(db, timestamps, headers, lastKmsgFooter,
-                    "/proc/last_kmsg", -LOG_SIZE, "SYSTEM_LAST_KMSG");
-            addFileWithFootersToDropBox(db, timestamps, headers, lastKmsgFooter,
-                    "/sys/fs/pstore/console-ramoops", -LOG_SIZE, "SYSTEM_LAST_KMSG");
-            addFileWithFootersToDropBox(db, timestamps, headers, lastKmsgFooter,
-                    "/sys/fs/pstore/console-ramoops-0", -LOG_SIZE, "SYSTEM_LAST_KMSG");
+            addLastkToDropBox(db, timestamps, headers, lastKmsgFooter,
+                    "/proc/last_kmsg", -LASTK_LOG_SIZE, "SYSTEM_LAST_KMSG");
+            addLastkToDropBox(db, timestamps, headers, lastKmsgFooter,
+                    "/sys/fs/pstore/console-ramoops", -LASTK_LOG_SIZE, "SYSTEM_LAST_KMSG");
+            addLastkToDropBox(db, timestamps, headers, lastKmsgFooter,
+                    "/sys/fs/pstore/console-ramoops-0", -LASTK_LOG_SIZE, "SYSTEM_LAST_KMSG");
             addFileToDropBox(db, timestamps, headers, "/cache/recovery/log", -LOG_SIZE,
                     "SYSTEM_RECOVERY_LOG");
             addFileToDropBox(db, timestamps, headers, "/cache/recovery/last_kmsg",
@@ -244,38 +306,68 @@ public class BootReceiver extends BroadcastReceiver {
         logFsMountTime();
         addFsckErrorsToDropBoxAndLogFsStat(db, timestamps, headers, -LOG_SIZE, "SYSTEM_FSCK");
         logSystemServerShutdownTimeMetrics();
+        writeTimestamps(timestamps);
+    }
 
-        // Scan existing tombstones (in case any new ones appeared)
-        File[] tombstoneFiles = TOMBSTONE_DIR.listFiles();
-        for (int i = 0; tombstoneFiles != null && i < tombstoneFiles.length; i++) {
-            if (tombstoneFiles[i].isFile()) {
-                addFileToDropBox(db, timestamps, headers, tombstoneFiles[i].getPath(),
-                        LOG_SIZE, "SYSTEM_TOMBSTONE");
-            }
+    private static final DropboxRateLimiter sDropboxRateLimiter = new DropboxRateLimiter();
+
+    /**
+     * Add a tombstone to the DropBox.
+     *
+     * @param ctx Context
+     * @param tombstone path to the tombstone
+     * @param proto whether the tombstone is stored as proto
+     * @param processName the name of the process corresponding to the tombstone
+     */
+    public static void addTombstoneToDropBox(
+                Context ctx, File tombstone, boolean proto, String processName) {
+        final DropBoxManager db = ctx.getSystemService(DropBoxManager.class);
+        if (db == null) {
+            Slog.e(TAG, "Can't log tombstone: DropBoxManager not available");
+            return;
         }
 
-        writeTimestamps(timestamps);
+        // Check if we should rate limit and abort early if needed. Do this for both proto and
+        // non-proto tombstones, even though proto tombstones do not support including the counter
+        // of events dropped since rate limiting activated yet.
+        DropboxRateLimiter.RateLimitResult rateLimitResult =
+                sDropboxRateLimiter.shouldRateLimit(TAG_TOMBSTONE, processName);
+        if (rateLimitResult.shouldRateLimit()) return;
 
-        // Start watching for new tombstone files; will record them as they occur.
-        // This gets registered with the singleton file observer thread.
-        sTombstoneObserver = new FileObserver(TOMBSTONE_DIR.getPath(), FileObserver.CLOSE_WRITE) {
-            @Override
-            public void onEvent(int event, String path) {
-                HashMap<String, Long> timestamps = readTimestamps();
-                try {
-                    File file = new File(TOMBSTONE_DIR, path);
-                    if (file.isFile()) {
-                        addFileToDropBox(db, timestamps, headers, file.getPath(), LOG_SIZE,
-                                TAG_TOMBSTONE);
-                    }
-                } catch (IOException e) {
-                    Slog.e(TAG, "Can't log tombstone", e);
+        HashMap<String, Long> timestamps = readTimestamps();
+        try {
+            if (proto) {
+                if (recordFileTimestamp(tombstone, timestamps)) {
+                    db.addFile(TAG_TOMBSTONE_PROTO, tombstone, 0);
                 }
-                writeTimestamps(timestamps);
+            } else {
+                // Add the header indicating how many events have been dropped due to rate limiting.
+                final String headers = getBootHeadersToLogAndUpdate()
+                        + rateLimitResult.createHeader();
+                addFileToDropBox(db, timestamps, headers, tombstone.getPath(), LOG_SIZE,
+                                 TAG_TOMBSTONE);
             }
-        };
+        } catch (IOException e) {
+            Slog.e(TAG, "Can't log tombstone", e);
+        }
+        writeTimestamps(timestamps);
+    }
 
-        sTombstoneObserver.startWatching();
+    private static void addLastkToDropBox(
+            DropBoxManager db, HashMap<String, Long> timestamps,
+            String headers, String footers, String filename, int maxSize,
+            String tag) throws IOException {
+        int extraSize = headers.length() + TAG_TRUNCATED.length() + footers.length();
+        // GMSCore will do 2nd truncation to be 192KiB
+        // LASTK_LOG_SIZE + extraSize must be less than GMSCORE_LASTK_LOG_SIZE
+        if (LASTK_LOG_SIZE + extraSize > GMSCORE_LASTK_LOG_SIZE) {
+          if (GMSCORE_LASTK_LOG_SIZE > extraSize) {
+            maxSize = -(GMSCORE_LASTK_LOG_SIZE - extraSize);
+          } else {
+            maxSize = 0;
+          }
+        }
+        addFileWithFootersToDropBox(db, timestamps, headers, footers, filename, maxSize, tag);
     }
 
     private static void addFileToDropBox(
@@ -291,23 +383,33 @@ public class BootReceiver extends BroadcastReceiver {
         if (db == null || !db.isTagEnabled(tag)) return;  // Logging disabled
 
         File file = new File(filename);
-        long fileTime = file.lastModified();
-        if (fileTime <= 0) return;  // File does not exist
-
-        if (timestamps.containsKey(filename) && timestamps.get(filename) == fileTime) {
-            return;  // Already logged this particular file
+        if (!recordFileTimestamp(file, timestamps)) {
+            return;
         }
 
-        timestamps.put(filename, fileTime);
-
-
-        String fileContents = FileUtils.readTextFile(file, maxSize, "[[TRUNCATED]]\n");
+        String fileContents = FileUtils.readTextFile(file, maxSize, TAG_TRUNCATED);
         String text = headers + fileContents + footers;
         // Create an additional report for system server native crashes, with a special tag.
         if (tag.equals(TAG_TOMBSTONE) && fileContents.contains(">>> system_server <<<")) {
             addTextToDropBox(db, "system_server_native_crash", text, filename, maxSize);
         }
+        if (tag.equals(TAG_TOMBSTONE)) {
+            FrameworkStatsLog.write(FrameworkStatsLog.TOMB_STONE_OCCURRED);
+        }
         addTextToDropBox(db, tag, text, filename, maxSize);
+    }
+
+    private static boolean recordFileTimestamp(File file, HashMap<String, Long> timestamps) {
+        final long fileTime = file.lastModified();
+        if (fileTime <= 0) return false;  // File does not exist
+
+        final String filename = file.getPath();
+        if (timestamps.containsKey(filename) && timestamps.get(filename) == fileTime) {
+            return false;  // Already logged this particular file
+        }
+
+        timestamps.put(filename, fileTime);
+        return true;
     }
 
     private static void addTextToDropBox(DropBoxManager db, String tag, String text,
@@ -342,7 +444,7 @@ public class BootReceiver extends BroadcastReceiver {
 
         timestamps.put(tag, fileTime);
 
-        String log = FileUtils.readTextFile(file, maxSize, "[[TRUNCATED]]\n");
+        String log = FileUtils.readTextFile(file, maxSize, TAG_TRUNCATED);
         StringBuilder sb = new StringBuilder();
         for (String line : log.split("\n")) {
             if (line.contains("audit")) {
@@ -367,7 +469,7 @@ public class BootReceiver extends BroadcastReceiver {
         long fileTime = file.lastModified();
         if (fileTime <= 0) return;  // File does not exist
 
-        String log = FileUtils.readTextFile(file, maxSize, "[[TRUNCATED]]\n");
+        String log = FileUtils.readTextFile(file, maxSize, TAG_TRUNCATED);
         Pattern pattern = Pattern.compile(FS_STAT_PATTERN);
         String lines[] = log.split("\n");
         int lineNumber = 0;
@@ -399,7 +501,28 @@ public class BootReceiver extends BroadcastReceiver {
         for (String propPostfix : MOUNT_DURATION_PROPS_POSTFIX) {
             int duration = SystemProperties.getInt("ro.boottime.init.mount_all." + propPostfix, 0);
             if (duration != 0) {
-                MetricsLogger.histogram(null, "boot_mount_all_duration_" + propPostfix, duration);
+                int eventType;
+                switch (propPostfix) {
+                    case "early":
+                        eventType =
+                                FrameworkStatsLog
+                                        .BOOT_TIME_EVENT_DURATION__EVENT__MOUNT_EARLY_DURATION;
+                        break;
+                    case "default":
+                        eventType =
+                                FrameworkStatsLog
+                                        .BOOT_TIME_EVENT_DURATION__EVENT__MOUNT_DEFAULT_DURATION;
+                        break;
+                    case "late":
+                        eventType =
+                                FrameworkStatsLog
+                                        .BOOT_TIME_EVENT_DURATION__EVENT__MOUNT_LATE_DURATION;
+                        break;
+                    default:
+                        continue;
+                }
+                FrameworkStatsLog.write(FrameworkStatsLog.BOOT_TIME_EVENT_DURATION_REPORTED,
+                        eventType, duration);
             }
         }
     }
@@ -503,7 +626,8 @@ public class BootReceiver extends BroadcastReceiver {
             Slog.e(TAG, "No value received for shutdown duration");
         }
 
-        StatsLog.write(StatsLog.SHUTDOWN_SEQUENCE_REPORTED, reboot, reason, start, duration);
+        FrameworkStatsLog.write(FrameworkStatsLog.SHUTDOWN_SEQUENCE_REPORTED, reboot, reason, start,
+                duration);
     }
 
     private static void logFsShutdownTime() {
@@ -530,16 +654,19 @@ public class BootReceiver extends BroadcastReceiver {
         Pattern pattern = Pattern.compile(LAST_SHUTDOWN_TIME_PATTERN, Pattern.MULTILINE);
         Matcher matcher = pattern.matcher(lines);
         if (matcher.find()) {
-            MetricsLogger.histogram(null, "boot_fs_shutdown_duration",
+            FrameworkStatsLog.write(FrameworkStatsLog.BOOT_TIME_EVENT_DURATION_REPORTED,
+                    FrameworkStatsLog.BOOT_TIME_EVENT_DURATION__EVENT__SHUTDOWN_DURATION,
                     Integer.parseInt(matcher.group(1)));
-            MetricsLogger.histogram(null, "boot_fs_shutdown_umount_stat",
+            FrameworkStatsLog.write(FrameworkStatsLog.BOOT_TIME_EVENT_ERROR_CODE_REPORTED,
+                    FrameworkStatsLog.BOOT_TIME_EVENT_ERROR_CODE__EVENT__SHUTDOWN_UMOUNT_STAT,
                     Integer.parseInt(matcher.group(2)));
             Slog.i(TAG, "boot_fs_shutdown," + matcher.group(1) + "," + matcher.group(2));
         } else { // not found
             // This can happen when a device has too much kernel log after file system unmount
             // ,exceeding maxReadSize. And having that much kernel logging can affect overall
             // performance as well. So it is better to fix the kernel to reduce the amount of log.
-            MetricsLogger.histogram(null, "boot_fs_shutdown_umount_stat",
+            FrameworkStatsLog.write(FrameworkStatsLog.BOOT_TIME_EVENT_ERROR_CODE_REPORTED,
+                    FrameworkStatsLog.BOOT_TIME_EVENT_ERROR_CODE__EVENT__SHUTDOWN_UMOUNT_STAT,
                     UMOUNT_STATUS_NOT_AVAILABLE);
             Slog.w(TAG, "boot_fs_shutdown, string not found");
         }
@@ -649,7 +776,12 @@ public class BootReceiver extends BroadcastReceiver {
             return;
         }
         stat = fixFsckFsStat(partition, stat, lines, startLineNumber, endLineNumber);
-        MetricsLogger.histogram(null, "boot_fs_stat_" + partition, stat);
+        if ("userdata".equals(partition) || "data".equals(partition)) {
+            FrameworkStatsLog.write(FrameworkStatsLog.BOOT_TIME_EVENT_ERROR_CODE_REPORTED,
+                    FrameworkStatsLog
+                            .BOOT_TIME_EVENT_ERROR_CODE__EVENT__FS_MGR_FS_STAT_DATA_PARTITION,
+                    stat);
+        }
         Slog.i(TAG, "fs_stat, partition:" + partition + " stat:0x" + Integer.toHexString(stat));
     }
 
@@ -658,8 +790,7 @@ public class BootReceiver extends BroadcastReceiver {
             HashMap<String, Long> timestamps = new HashMap<String, Long>();
             boolean success = false;
             try (final FileInputStream stream = sFile.openRead()) {
-                XmlPullParser parser = Xml.newPullParser();
-                parser.setInput(stream, StandardCharsets.UTF_8.name());
+                TypedXmlPullParser parser = Xml.resolvePullParser(stream);
 
                 int type;
                 while ((type = parser.next()) != XmlPullParser.START_TAG
@@ -681,8 +812,7 @@ public class BootReceiver extends BroadcastReceiver {
                     String tagName = parser.getName();
                     if (tagName.equals("log")) {
                         final String filename = parser.getAttributeValue(null, "filename");
-                        final long timestamp = Long.valueOf(parser.getAttributeValue(
-                                    null, "timestamp"));
+                        final long timestamp = parser.getAttributeLong(null, "timestamp");
                         timestamps.put(filename, timestamp);
                     } else {
                         Slog.w(TAG, "Unknown tag: " + parser.getName());
@@ -710,7 +840,7 @@ public class BootReceiver extends BroadcastReceiver {
         }
     }
 
-    private void writeTimestamps(HashMap<String, Long> timestamps) {
+    private static void writeTimestamps(HashMap<String, Long> timestamps) {
         synchronized (sFile) {
             final FileOutputStream stream;
             try {
@@ -721,8 +851,7 @@ public class BootReceiver extends BroadcastReceiver {
             }
 
             try {
-                XmlSerializer out = new FastXmlSerializer();
-                out.setOutput(stream, StandardCharsets.UTF_8.name());
+                TypedXmlSerializer out = Xml.resolveSerializer(stream);
                 out.startDocument(null, true);
                 out.startTag(null, "log-files");
 
@@ -731,7 +860,7 @@ public class BootReceiver extends BroadcastReceiver {
                     String filename = itor.next();
                     out.startTag(null, "log");
                     out.attribute(null, "filename", filename);
-                    out.attribute(null, "timestamp", timestamps.get(filename).toString());
+                    out.attributeLong(null, "timestamp", timestamps.get(filename));
                     out.endTag(null, "log");
                 }
 

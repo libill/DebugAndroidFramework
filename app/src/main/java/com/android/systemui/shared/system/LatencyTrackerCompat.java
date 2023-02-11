@@ -24,11 +24,10 @@ import com.android.internal.util.LatencyTracker;
  * @see LatencyTracker
  */
 public class LatencyTrackerCompat {
-    public static boolean isEnabled(Context context) {
-        return LatencyTracker.isEnabled(context);
-    }
 
-    public static void logToggleRecents(int duration) {
-        LatencyTracker.logAction(LatencyTracker.ACTION_TOGGLE_RECENTS, duration);
+    /** @see LatencyTracker */
+    public static void logToggleRecents(Context context, int duration) {
+        LatencyTracker.getInstance(context).logAction(LatencyTracker.ACTION_TOGGLE_RECENTS,
+                duration);
     }
 }

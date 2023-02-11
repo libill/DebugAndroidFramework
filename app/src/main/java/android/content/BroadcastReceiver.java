@@ -16,13 +16,19 @@
 
 package android.content;
 
+import android.annotation.NonNull;
+import android.annotation.SystemApi;
 import android.app.ActivityManager;
 import android.app.ActivityThread;
 import android.app.IActivityManager;
 import android.app.QueuedWork;
+import android.compat.annotation.UnsupportedAppUsage;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.os.RemoteException;
+import android.os.Trace;
+import android.os.UserHandle;
 import android.util.Log;
 import android.util.Slog;
 
@@ -43,6 +49,7 @@ import android.util.Slog;
  *
  */
 public abstract class BroadcastReceiver {
+    @UnsupportedAppUsage
     private PendingResult mPendingResult;
     private boolean mDebugUnregister;
 
@@ -69,20 +76,33 @@ public abstract class BroadcastReceiver {
         /** @hide */
         public static final int TYPE_UNREGISTERED = 2;
 
+        @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 115609023)
         final int mType;
+        @UnsupportedAppUsage
         final boolean mOrderedHint;
+        @UnsupportedAppUsage
         final boolean mInitialStickyHint;
+        @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 115609023)
         final IBinder mToken;
+        @UnsupportedAppUsage
         final int mSendingUser;
+        @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 115609023)
         final int mFlags;
 
+        @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 115609023)
         int mResultCode;
+        @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 115609023)
         String mResultData;
+        @UnsupportedAppUsage
         Bundle mResultExtras;
+        @UnsupportedAppUsage
         boolean mAbortBroadcast;
+        @UnsupportedAppUsage
         boolean mFinished;
+        String mReceiverClassName;
 
         /** @hide */
+        @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 115609023)
         public PendingResult(int resultCode, String resultData, Bundle resultExtras, int type,
                 boolean ordered, boolean sticky, IBinder token, int userId, int flags) {
             mResultCode = resultCode;
@@ -201,6 +221,12 @@ public abstract class BroadcastReceiver {
          * next broadcast will proceed.
          */
         public final void finish() {
+            if (Trace.isTagEnabled(Trace.TRACE_TAG_ACTIVITY_MANAGER)) {
+                Trace.traceCounter(Trace.TRACE_TAG_ACTIVITY_MANAGER,
+                        "PendingResult#finish#ClassName:" + mReceiverClassName,
+                        1);
+            }
+
             if (mType == TYPE_COMPONENT) {
                 final IActivityManager mgr = ActivityManager.getService();
                 if (QueuedWork.hasPendingWork()) {
@@ -350,7 +376,7 @@ public abstract class BroadcastReceiver {
      * to run, allowing them to execute for 30 seconds or even a bit more.  This is something that
      * receivers should rarely take advantage of (long work should be punted to another system
      * facility such as {@link android.app.job.JobScheduler}, {@link android.app.Service}, or
-     * see especially {@link android.support.v4.app.JobIntentService}), but can be useful in
+     * see especially {@link androidx.core.app.JobIntentService}), but can be useful in
      * certain rare cases where it is necessary to do some work as soon as the broadcast is
      * delivered.  Keep in mind that the work you do here will block further broadcasts until
      * it completes, so taking advantage of this at all excessively can be counter-productive
@@ -365,6 +391,14 @@ public abstract class BroadcastReceiver {
     public final PendingResult goAsync() {
         PendingResult res = mPendingResult;
         mPendingResult = null;
+
+        if (res != null && Trace.isTagEnabled(Trace.TRACE_TAG_ACTIVITY_MANAGER)) {
+            res.mReceiverClassName = getClass().getName();
+            Trace.traceCounter(Trace.TRACE_TAG_ACTIVITY_MANAGER,
+                    "BroadcastReceiver#goAsync#ClassName:" + res.mReceiverClassName,
+                    1);
+        }
+
         return res;
     }
 
@@ -595,6 +629,7 @@ public abstract class BroadcastReceiver {
     /**
      * For internal use to set the result data that is active. @hide
      */
+    @UnsupportedAppUsage
     public final void setPendingResult(PendingResult result) {
         mPendingResult = result;
     }
@@ -602,8 +637,23 @@ public abstract class BroadcastReceiver {
     /**
      * For internal use to set the result data that is active. @hide
      */
+    @UnsupportedAppUsage
     public final PendingResult getPendingResult() {
         return mPendingResult;
+    }
+
+    /**
+     * Returns the user that the broadcast was sent to.
+     *
+     * <p>It can be used in a receiver registered by
+     * {@link Context#registerReceiverForAllUsers Context.registerReceiverForAllUsers()}
+     * to determine on which user the broadcast was sent.
+     *
+     * @hide
+     */
+    @SystemApi
+    public final @NonNull UserHandle getSendingUser() {
+        return UserHandle.of(getSendingUserId());
     }
 
     /** @hide */

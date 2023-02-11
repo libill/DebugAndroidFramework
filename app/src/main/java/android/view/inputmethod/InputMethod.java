@@ -23,7 +23,20 @@ import android.annotation.SdkConstant;
 import android.annotation.SdkConstant.SdkConstantType;
 import android.inputmethodservice.InputMethodService;
 import android.os.IBinder;
+import android.os.RemoteException;
 import android.os.ResultReceiver;
+import android.util.Log;
+import android.view.InputChannel;
+import android.view.MotionEvent;
+import android.view.View;
+import android.window.ImeOnBackInvokedDispatcher;
+
+import com.android.internal.inputmethod.IInputMethodPrivilegedOperations;
+import com.android.internal.inputmethod.InputMethodNavButtonFlags;
+import com.android.internal.view.IInlineSuggestionsRequestCallback;
+import com.android.internal.view.InlineSuggestionsRequestInfo;
+
+import java.util.List;
 
 /**
  * The InputMethod interface represents an input method which can generate key
@@ -56,6 +69,8 @@ import android.os.ResultReceiver;
  * which is what clients use to communicate with the input method.
  */
 public interface InputMethod {
+    /** @hide **/
+    public static final String TAG = "InputMethod";
     /**
      * This is the interface name that a service implementing an input
      * method should say that it supports -- that is, this is the action it
@@ -79,17 +94,56 @@ public interface InputMethod {
     public interface SessionCallback {
         public void sessionCreated(InputMethodSession session);
     }
-    
+
+    /**
+     * Called first thing after an input method is created, this supplies a
+     * unique token for the session it has with the system service as well as
+     * IPC endpoint to do some other privileged operations.
+     *
+     * @param token special token for the system to identify
+     *              {@link InputMethodService}
+     * @param privilegedOperations IPC endpoint to do some privileged
+     *                             operations that are allowed only to the
+     *                             current IME.
+     * @param configChanges {@link InputMethodInfo#getConfigChanges()} declared by IME.
+     * @param stylusHwSupported {@link InputMethodInfo#supportsStylusHandwriting()} declared by IME.
+     * @param navButtonFlags The initial state of {@link InputMethodNavButtonFlags}.
+     * @hide
+     */
+    @MainThread
+    default void initializeInternal(IBinder token,
+            IInputMethodPrivilegedOperations privilegedOperations, int configChanges,
+            boolean stylusHwSupported, @InputMethodNavButtonFlags int navButtonFlags) {
+        attachToken(token);
+    }
+
+    /**
+     * Called to notify the IME that Autofill Frameworks requested an inline suggestions request.
+     *
+     * @param requestInfo information needed to create an {@link InlineSuggestionsRequest}.
+     * @param cb {@link IInlineSuggestionsRequestCallback} used to pass back the request object.
+     *
+     * @hide
+     */
+    default void onCreateInlineSuggestionsRequest(InlineSuggestionsRequestInfo requestInfo,
+            IInlineSuggestionsRequestCallback cb) {
+        try {
+            cb.onInlineSuggestionsUnsupported();
+        } catch (RemoteException e) {
+            Log.w(TAG, "Failed to call onInlineSuggestionsUnsupported.", e);
+        }
+    }
+
     /**
      * Called first thing after an input method is created, this supplies a
      * unique token for the session it has with the system service.  It is
      * needed to identify itself with the service to validate its operations.
      * This token <strong>must not</strong> be passed to applications, since
      * it grants special priviledges that should not be given to applications.
-     * 
-     * <p>Note: to protect yourself from malicious clients, you should only
-     * accept the first token given to you.  Any after that may come from the
-     * client.
+     *
+     * <p>The system guarantees that this method is called back between
+     * {@link InputMethodService#onCreate()} and {@link InputMethodService#onDestroy()}
+     * at most once.
      */
     @MainThread
     public void attachToken(IBinder token);
@@ -178,6 +232,11 @@ public interface InputMethod {
      *                        the next {@link #startInput(InputConnection, EditorInfo, IBinder)} as
      *                        long as your implementation of {@link InputMethod} relies on such
      *                        IPCs
+     * @param navButtonFlags {@link InputMethodNavButtonFlags} in the initial state of this session.
+     * @param imeDispatcher The {@link ImeOnBackInvokedDispatcher }} to be set on the
+     *                      IME's {@link android.window.WindowOnBackInvokedDispatcher}, so that IME
+     *                      {@link android.window.OnBackInvokedCallback}s can be forwarded to
+     *                      the client requesting to start input.
      * @see #startInput(InputConnection, EditorInfo)
      * @see #restartInput(InputConnection, EditorInfo)
      * @see EditorInfo
@@ -186,12 +245,23 @@ public interface InputMethod {
     @MainThread
     default void dispatchStartInputWithToken(@Nullable InputConnection inputConnection,
             @NonNull EditorInfo editorInfo, boolean restarting,
-            @NonNull IBinder startInputToken) {
+            @NonNull IBinder startInputToken, @InputMethodNavButtonFlags int navButtonFlags,
+            @NonNull ImeOnBackInvokedDispatcher imeDispatcher) {
         if (restarting) {
             restartInput(inputConnection, editorInfo);
         } else {
             startInput(inputConnection, editorInfo);
         }
+    }
+
+    /**
+     * Notifies that {@link InputMethodNavButtonFlags} have been updated.
+     *
+     * @param navButtonFlags The new {@link InputMethodNavButtonFlags}.
+     * @hide
+     */
+    @MainThread
+    default void onNavButtonFlagsChanged(@InputMethodNavButtonFlags int navButtonFlags) {
     }
 
     /**
@@ -240,7 +310,30 @@ public interface InputMethod {
      * until deliberated dismissed by the user in its UI.
      */
     public static final int SHOW_FORCED = 0x00002;
-    
+
+    /**
+     * Request that any soft input part of the input method be shown to the user.
+     *
+     * @param flags Provides additional information about the show request.
+     * Currently may be 0 or have the bit {@link #SHOW_EXPLICIT} set.
+     * @param resultReceiver The client requesting the show may wish to
+     * be told the impact of their request, which should be supplied here.
+     * The result code should be
+     * {@link InputMethodManager#RESULT_UNCHANGED_SHOWN InputMethodManager.RESULT_UNCHANGED_SHOWN},
+     * {@link InputMethodManager#RESULT_UNCHANGED_HIDDEN InputMethodManager.RESULT_UNCHANGED_HIDDEN},
+     * {@link InputMethodManager#RESULT_SHOWN InputMethodManager.RESULT_SHOWN}, or
+     * {@link InputMethodManager#RESULT_HIDDEN InputMethodManager.RESULT_HIDDEN}.
+     * @param showInputToken an opaque {@link android.os.Binder} token to identify which API call
+     *        of {@link InputMethodManager#showSoftInput(View, int)} is associated with
+     *        this callback.
+     * @hide
+     */
+    @MainThread
+    default public void showSoftInputWithToken(int flags, ResultReceiver resultReceiver,
+            IBinder showInputToken) {
+        showSoftInput(flags, resultReceiver);
+    }
+
     /**
      * Request that any soft input part of the input method be shown to the user.
      * 
@@ -256,7 +349,7 @@ public interface InputMethod {
      */
     @MainThread
     public void showSoftInput(int flags, ResultReceiver resultReceiver);
-    
+
     /**
      * Request that any soft input part of the input method be hidden from the user.
      * @param flags Provides additional information about the show request.
@@ -266,6 +359,27 @@ public interface InputMethod {
      * The result code should be
      * {@link InputMethodManager#RESULT_UNCHANGED_SHOWN InputMethodManager.RESULT_UNCHANGED_SHOWN},
      * {@link InputMethodManager#RESULT_UNCHANGED_HIDDEN InputMethodManager.RESULT_UNCHANGED_HIDDEN},
+     * {@link InputMethodManager#RESULT_SHOWN InputMethodManager.RESULT_SHOWN}, or
+     * {@link InputMethodManager#RESULT_HIDDEN InputMethodManager.RESULT_HIDDEN}.
+     * @param hideInputToken an opaque {@link android.os.Binder} token to identify which API call
+     *         of {@link InputMethodManager#hideSoftInputFromWindow(IBinder, int)}} is associated
+     *         with this callback.
+     * @hide
+     */
+    @MainThread
+    public void hideSoftInputWithToken(int flags, ResultReceiver resultReceiver,
+            IBinder hideInputToken);
+
+    /**
+     * Request that any soft input part of the input method be hidden from the user.
+     * @param flags Provides additional information about the show request.
+     * Currently always 0.
+     * @param resultReceiver The client requesting the show may wish to
+     * be told the impact of their request, which should be supplied here.
+     * The result code should be
+     * {@link InputMethodManager#RESULT_UNCHANGED_SHOWN InputMethodManager.RESULT_UNCHANGED_SHOWN},
+     * {@link InputMethodManager#RESULT_UNCHANGED_HIDDEN
+     *        InputMethodManager.RESULT_UNCHANGED_HIDDEN},
      * {@link InputMethodManager#RESULT_SHOWN InputMethodManager.RESULT_SHOWN}, or
      * {@link InputMethodManager#RESULT_HIDDEN InputMethodManager.RESULT_HIDDEN}.
      */
@@ -278,4 +392,40 @@ public interface InputMethod {
      */
     @MainThread
     public void changeInputMethodSubtype(InputMethodSubtype subtype);
+
+    /**
+     * Checks if IME is ready to start stylus handwriting session.
+     * If yes, {@link #startStylusHandwriting(InputChannel, List)} is called.
+     * @param requestId
+     * @hide
+     */
+    default void canStartStylusHandwriting(int requestId) {
+        // intentionally empty
+    }
+
+    /**
+     * Start stylus handwriting session.
+     * @hide
+     */
+    default void startStylusHandwriting(
+            int requestId, @NonNull InputChannel channel, @Nullable List<MotionEvent> events) {
+        // intentionally empty
+    }
+
+    /**
+     * Initialize Ink window early-on.
+     * @hide
+     */
+    default void initInkWindow() {
+        // intentionally empty
+    }
+
+    /**
+     * Finish stylus handwriting session.
+     * @hide
+     */
+    default void finishStylusHandwriting() {
+        // intentionally empty
+    }
+
 }

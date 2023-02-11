@@ -16,7 +16,13 @@
 
 package com.android.server.job;
 
+import android.annotation.NonNull;
+import android.annotation.Nullable;
+import android.util.ArraySet;
+
 import com.android.server.job.controllers.JobStatus;
+
+import java.util.List;
 
 /**
  * Interface through which a {@link com.android.server.job.controllers.StateController} informs
@@ -25,10 +31,10 @@ import com.android.server.job.controllers.JobStatus;
  */
 public interface StateChangedListener {
     /**
-     * Called by the controller to notify the JobManager that it should check on the state of a
-     * task.
+     * Called by the controller to notify the JobScheduler that it should check on the state of a
+     * set of jobs. If {@code changedJobs} is null, then all registered jobs will be evaluated.
      */
-    public void onControllerStateChanged();
+    void onControllerStateChanged(@Nullable ArraySet<JobStatus> changedJobs);
 
     /**
      * Called by the controller to notify the JobManager that regardless of the state of the task,
@@ -39,4 +45,10 @@ public interface StateChangedListener {
     public void onRunJobNow(JobStatus jobStatus);
 
     public void onDeviceIdleStateChanged(boolean deviceIdle);
+
+    /**
+     * Called when these jobs are added or removed from the
+     * {@link android.app.usage.UsageStatsManager#STANDBY_BUCKET_RESTRICTED} bucket.
+     */
+    void onRestrictedBucketChanged(@NonNull List<JobStatus> jobs);
 }

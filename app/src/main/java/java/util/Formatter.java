@@ -56,11 +56,12 @@ import java.time.temporal.ChronoField;
 import java.time.temporal.TemporalAccessor;
 import java.time.temporal.TemporalQueries;
 
+import libcore.icu.DecimalFormatData;
 import libcore.icu.LocaleData;
-import sun.misc.FpUtils;
-import sun.misc.DoubleConsts;
-import sun.misc.FormattedFloatingDecimal;
+import jdk.internal.math.DoubleConsts;
+import jdk.internal.math.FormattedFloatingDecimal;
 
+// Android-changed: Use localized exponent separator for %e.
 /**
  * An interpreter for printf-style format strings.  This class provides support
  * for layout justification and alignment, common formats for numeric, string,
@@ -2283,8 +2284,13 @@ public final class Formatter implements Closeable, Flushable {
 
     private static char getZero(Locale l) {
         if ((l != null) && !l.equals(Locale.US)) {
-            DecimalFormatSymbols dfs = DecimalFormatSymbols.getInstance(l);
-            return dfs.getZeroDigit();
+            // Android-changed: Improve the performance by 10x http://b/197788756
+            // Unclear if this mapping is needed but inherited from DecimalFormatSymbols
+            l = LocaleData.mapInvalidAndNullLocales(l);
+            DecimalFormatData decimalFormatData = DecimalFormatData.getInstance(l);
+            return decimalFormatData.getZeroDigit();
+            // DecimalFormatSymbols dfs = DecimalFormatSymbols.getInstance(l);
+            //  return dfs.getZeroDigit();
         } else {
             return '0';
         }
@@ -3375,10 +3381,10 @@ public final class Formatter implements Closeable, Flushable {
 
                 // BEGIN Android-changed: Use localized exponent separator for %e.
                 Locale separatorLocale = (l != null) ? l : Locale.getDefault();
-                LocaleData localeData = LocaleData.get(separatorLocale);
+                DecimalFormatData formatData = DecimalFormatData.getInstance(separatorLocale);
                 sb.append(f.contains(Flags.UPPERCASE) ?
-                        localeData.exponentSeparator.toUpperCase(separatorLocale) :
-                        localeData.exponentSeparator.toLowerCase(separatorLocale));
+                        formatData.getExponentSeparator().toUpperCase(separatorLocale) :
+                        formatData.getExponentSeparator().toLowerCase(separatorLocale));
                 // END Android-changed: Use localized exponent separator for %e.
 
                 Flags flags = f.dup().remove(Flags.GROUP);
@@ -4404,8 +4410,13 @@ public final class Formatter implements Closeable, Flushable {
 
         private char getZero(Locale l) {
             if ((l != null) &&  !l.equals(locale())) {
-                DecimalFormatSymbols dfs = DecimalFormatSymbols.getInstance(l);
-                return dfs.getZeroDigit();
+                // Android-changed: Improve the performance by 10x http://b/197788756
+                // Unclear if this mapping is needed but inherited from DecimalFormatSymbols
+                l = LocaleData.mapInvalidAndNullLocales(l);
+                DecimalFormatData decimalFormatData = DecimalFormatData.getInstance(l);
+                return decimalFormatData.getZeroDigit();
+                //  DecimalFormatSymbols dfs = DecimalFormatSymbols.getInstance(l);
+                //  return dfs.getZeroDigit();
             }
             return zero;
         }
@@ -4460,14 +4471,15 @@ public final class Formatter implements Closeable, Flushable {
                     grpSep = dfs.getGroupingSeparator();
                     DecimalFormat df = (DecimalFormat) NumberFormat.getIntegerInstance(l);
                     grpSize = df.getGroupingSize();
-                    // BEGIN Android-changed: http://b/33245708
+                    // BEGIN Android-changed: Fix division by zero if group separator is not clear.
+                    // http://b/33245708
                     // Some locales have a group separator but also patterns without groups.
                     // If we do not clear the group separator in these cases a divide by zero
                     // is thrown when determining where to place the separators.
                     if (!df.isGroupingUsed() || df.getGroupingSize() == 0) {
                         grpSep = '\0';
                     }
-                    // END Android-changed: http://b/33245708.
+                    // END Android-changed: Fix division by zero if group separator is not clear.
                 }
             }
 

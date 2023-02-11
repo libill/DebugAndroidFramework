@@ -18,8 +18,10 @@ package android.util;
 
 import com.android.internal.util.ArrayUtils;
 import com.android.internal.util.Preconditions;
-import java.util.Arrays;
+
 import libcore.util.EmptyArray;
+
+import java.util.Arrays;
 
 /**
  * Implements a growing array of int primitives.
@@ -32,7 +34,7 @@ public class IntArray implements Cloneable {
     private int[] mValues;
     private int mSize;
 
-    private  IntArray(int[] array, int size) {
+    private IntArray(int[] array, int size) {
         mValues = array;
         mSize = Preconditions.checkArgumentInRange(size, 0, array.length, "size");
     }
@@ -102,7 +104,7 @@ public class IntArray implements Cloneable {
         ensureCapacity(1);
         int rightSegment = mSize - index;
         mSize++;
-        checkBounds(index);
+        ArrayUtils.checkBounds(mSize, index);
 
         if (rightSegment != 0) {
             // Move by 1 all values from the right of 'index'
@@ -142,6 +144,17 @@ public class IntArray implements Cloneable {
     }
 
     /**
+     * Adds the values in the specified array to this array.
+     */
+    public void addAll(int[] values) {
+        final int count = values.length;
+        ensureCapacity(count);
+
+        System.arraycopy(values, 0, mValues, mSize, count);
+        mSize += count;
+    }
+
+    /**
      * Ensures capacity to append at least <code>count</code> values.
      */
     private void ensureCapacity(int count) {
@@ -165,17 +178,15 @@ public class IntArray implements Cloneable {
     }
 
     @Override
-    public IntArray clone() throws CloneNotSupportedException {
-        final IntArray clone = (IntArray) super.clone();
-        clone.mValues = mValues.clone();
-        return clone;
+    public IntArray clone() {
+        return new IntArray(mValues.clone(), mSize);
     }
 
     /**
      * Returns the value at the specified position in this array.
      */
     public int get(int index) {
-        checkBounds(index);
+        ArrayUtils.checkBounds(mSize, index);
         return mValues[index];
     }
 
@@ -183,7 +194,7 @@ public class IntArray implements Cloneable {
      * Sets the value at the specified position in this array.
      */
     public void set(int index, int value) {
-        checkBounds(index);
+        ArrayUtils.checkBounds(mSize, index);
         mValues[index] = value;
     }
 
@@ -205,7 +216,7 @@ public class IntArray implements Cloneable {
      * Removes the value at the specified index from this array.
      */
     public void remove(int index) {
-        checkBounds(index);
+        ArrayUtils.checkBounds(mSize, index);
         System.arraycopy(mValues, index + 1, mValues, index, mSize - index - 1);
         mSize--;
     }
@@ -222,11 +233,5 @@ public class IntArray implements Cloneable {
      */
     public int[] toArray() {
         return Arrays.copyOf(mValues, mSize);
-    }
-
-    private void checkBounds(int index) {
-        if (index < 0 || mSize <= index) {
-            throw new ArrayIndexOutOfBoundsException(mSize, index);
-        }
     }
 }

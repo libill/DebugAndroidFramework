@@ -15,23 +15,97 @@
  */
 package com.android.internal.os;
 
+import android.os.BatteryConsumer;
 import android.os.BatteryStats;
+import android.os.BatteryUsageStats;
+import android.os.BatteryUsageStatsQuery;
+import android.os.Process;
+import android.os.UidBatteryConsumer;
 import android.util.ArrayMap;
 import android.util.Log;
+import android.util.SparseArray;
 
 public class WakelockPowerCalculator extends PowerCalculator {
     private static final String TAG = "WakelockPowerCalculator";
-    private static final boolean DEBUG = BatteryStatsHelper.DEBUG;
-    private final double mPowerWakelock;
-    private long mTotalAppWakelockTimeMs = 0;
+    private static final boolean DEBUG = PowerCalculator.DEBUG;
+    private final UsageBasedPowerEstimator mPowerEstimator;
+
+    private static class PowerAndDuration {
+        public long durationMs;
+        public double powerMah;
+    }
 
     public WakelockPowerCalculator(PowerProfile profile) {
-        mPowerWakelock = profile.getAveragePower(PowerProfile.POWER_CPU_IDLE);
+        mPowerEstimator = new UsageBasedPowerEstimator(
+                profile.getAveragePower(PowerProfile.POWER_CPU_IDLE));
     }
 
     @Override
-    public void calculateApp(BatterySipper app, BatteryStats.Uid u, long rawRealtimeUs,
-                             long rawUptimeUs, int statsType) {
+    public boolean isPowerComponentSupported(@BatteryConsumer.PowerComponent int powerComponent) {
+        return powerComponent == BatteryConsumer.POWER_COMPONENT_WAKELOCK;
+    }
+
+    @Override
+    public void calculate(BatteryUsageStats.Builder builder, BatteryStats batteryStats,
+            long rawRealtimeUs, long rawUptimeUs, BatteryUsageStatsQuery query) {
+        final PowerAndDuration result = new PowerAndDuration();
+        UidBatteryConsumer.Builder osBatteryConsumer = null;
+        double osPowerMah = 0;
+        long osDurationMs = 0;
+        long totalAppDurationMs = 0;
+        double appPowerMah = 0;
+        final SparseArray<UidBatteryConsumer.Builder> uidBatteryConsumerBuilders =
+                builder.getUidBatteryConsumerBuilders();
+        for (int i = uidBatteryConsumerBuilders.size() - 1; i >= 0; i--) {
+            final UidBatteryConsumer.Builder app = uidBatteryConsumerBuilders.valueAt(i);
+            calculateApp(result, app.getBatteryStatsUid(), rawRealtimeUs,
+                    BatteryStats.STATS_SINCE_CHARGED);
+            app.setUsageDurationMillis(BatteryConsumer.POWER_COMPONENT_WAKELOCK, result.durationMs)
+                    .setConsumedPower(BatteryConsumer.POWER_COMPONENT_WAKELOCK, result.powerMah);
+            if (!app.isVirtualUid()) {
+                totalAppDurationMs += result.durationMs;
+                appPowerMah += result.powerMah;
+            }
+
+            if (app.getUid() == Process.ROOT_UID) {
+                osBatteryConsumer = app;
+                osDurationMs = result.durationMs;
+                osPowerMah = result.powerMah;
+            }
+        }
+
+        // The device has probably been awake for longer than the screen on
+        // time and application wake lock time would account for.  Assign
+        // this remainder to the OS, if possible.
+        calculateRemaining(result, batteryStats, rawRealtimeUs, rawUptimeUs,
+                BatteryStats.STATS_SINCE_CHARGED, osPowerMah, osDurationMs, totalAppDurationMs);
+        final double remainingPowerMah = result.powerMah;
+        if (osBatteryConsumer != null) {
+            osBatteryConsumer.setUsageDurationMillis(BatteryConsumer.POWER_COMPONENT_WAKELOCK,
+                    result.durationMs)
+                    .setConsumedPower(BatteryConsumer.POWER_COMPONENT_WAKELOCK, remainingPowerMah);
+        }
+
+        long wakeTimeMs = calculateWakeTimeMillis(batteryStats, rawRealtimeUs, rawUptimeUs);
+        if (wakeTimeMs < 0) {
+            wakeTimeMs = 0;
+        }
+        builder.getAggregateBatteryConsumerBuilder(
+                BatteryUsageStats.AGGREGATE_BATTERY_CONSUMER_SCOPE_DEVICE)
+                .setUsageDurationMillis(BatteryConsumer.POWER_COMPONENT_WAKELOCK,
+                        wakeTimeMs)
+                .setConsumedPower(BatteryConsumer.POWER_COMPONENT_WAKELOCK,
+                        appPowerMah + remainingPowerMah);
+        builder.getAggregateBatteryConsumerBuilder(
+                BatteryUsageStats.AGGREGATE_BATTERY_CONSUMER_SCOPE_ALL_APPS)
+                .setUsageDurationMillis(BatteryConsumer.POWER_COMPONENT_WAKELOCK,
+                        totalAppDurationMs)
+                .setConsumedPower(BatteryConsumer.POWER_COMPONENT_WAKELOCK,
+                        appPowerMah);
+    }
+
+    private void calculateApp(PowerAndDuration result, BatteryStats.Uid u, long rawRealtimeUs,
+            int statsType) {
         long wakeLockTimeUs = 0;
         final ArrayMap<String, ? extends BatteryStats.Uid.Wakelock> wakelockStats =
                 u.getWakelockStats();
@@ -46,36 +120,44 @@ public class WakelockPowerCalculator extends PowerCalculator {
                 wakeLockTimeUs += timer.getTotalTimeLocked(rawRealtimeUs, statsType);
             }
         }
-        app.wakeLockTimeMs = wakeLockTimeUs / 1000; // convert to millis
-        mTotalAppWakelockTimeMs += app.wakeLockTimeMs;
+        result.durationMs = wakeLockTimeUs / 1000; // convert to millis
 
         // Add cost of holding a wake lock.
-        app.wakeLockPowerMah = (app.wakeLockTimeMs * mPowerWakelock) / (1000*60*60);
-        if (DEBUG && app.wakeLockPowerMah != 0) {
-            Log.d(TAG, "UID " + u.getUid() + ": wake " + app.wakeLockTimeMs
-                    + " power=" + BatteryStatsHelper.makemAh(app.wakeLockPowerMah));
+        result.powerMah = mPowerEstimator.calculatePower(result.durationMs);
+        if (DEBUG && result.powerMah != 0) {
+            Log.d(TAG, "UID " + u.getUid() + ": wake " + result.durationMs
+                    + " power=" + BatteryStats.formatCharge(result.powerMah));
         }
     }
 
-    @Override
-    public void calculateRemaining(BatterySipper app, BatteryStats stats, long rawRealtimeUs,
-                                   long rawUptimeUs, int statsType) {
-        long wakeTimeMillis = stats.getBatteryUptime(rawUptimeUs) / 1000;
-        wakeTimeMillis -= mTotalAppWakelockTimeMs
-                + (stats.getScreenOnTime(rawRealtimeUs, statsType) / 1000);
+    private void calculateRemaining(PowerAndDuration result, BatteryStats stats, long rawRealtimeUs,
+            long rawUptimeUs, int statsType, double osPowerMah, long osDurationMs,
+            long totalAppDurationMs) {
+        final long wakeTimeMillis = calculateWakeTimeMillis(stats, rawRealtimeUs, rawUptimeUs)
+                - totalAppDurationMs;
         if (wakeTimeMillis > 0) {
-            final double power = (wakeTimeMillis * mPowerWakelock) / (1000*60*60);
+            final double power = mPowerEstimator.calculatePower(wakeTimeMillis);
             if (DEBUG) {
-                Log.d(TAG, "OS wakeLockTime " + wakeTimeMillis + " power "
-                        + BatteryStatsHelper.makemAh(power));
+                Log.d(TAG, "OS wakeLockTime " + wakeTimeMillis
+                        + " power " + BatteryStats.formatCharge(power));
             }
-            app.wakeLockTimeMs += wakeTimeMillis;
-            app.wakeLockPowerMah += power;
+            result.durationMs = osDurationMs + wakeTimeMillis;
+            result.powerMah = osPowerMah + power;
+        } else {
+            result.durationMs = 0;
+            result.powerMah = 0;
         }
     }
 
-    @Override
-    public void reset() {
-        mTotalAppWakelockTimeMs = 0;
+    /**
+     * Return on-battery/screen-off time.  May be negative if the screen-on time exceeds
+     * the on-battery time.
+     */
+    private long calculateWakeTimeMillis(BatteryStats batteryStats, long rawRealtimeUs,
+            long rawUptimeUs) {
+        final long batteryUptimeUs = batteryStats.getBatteryUptime(rawUptimeUs);
+        final long screenOnTimeUs =
+                batteryStats.getScreenOnTime(rawRealtimeUs, BatteryStats.STATS_SINCE_CHARGED);
+        return (batteryUptimeUs - screenOnTimeUs) / 1000;
     }
 }

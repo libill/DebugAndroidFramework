@@ -16,12 +16,13 @@
 
 package com.android.server.job;
 
+import static android.net.NetworkCapabilities.NET_CAPABILITY_TEMPORARILY_NOT_METERED;
+import static android.net.NetworkCapabilities.TRANSPORT_TEST;
+
 import static com.android.server.job.JobSchedulerService.sElapsedRealtimeClock;
 import static com.android.server.job.JobSchedulerService.sSystemClock;
 
 import android.annotation.Nullable;
-import android.app.ActivityManager;
-import android.app.IActivityManager;
 import android.app.job.JobInfo;
 import android.content.ComponentName;
 import android.content.Context;
@@ -32,20 +33,22 @@ import android.os.PersistableBundle;
 import android.os.Process;
 import android.os.SystemClock;
 import android.os.UserHandle;
+import android.text.TextUtils;
 import android.text.format.DateUtils;
 import android.util.ArraySet;
 import android.util.AtomicFile;
 import android.util.Pair;
 import android.util.Slog;
 import android.util.SparseArray;
+import android.util.SystemConfigFileCommitEventLogger;
+import android.util.TypedXmlSerializer;
 import android.util.Xml;
 
+import com.android.internal.annotations.GuardedBy;
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.util.ArrayUtils;
 import com.android.internal.util.BitUtils;
-import com.android.internal.util.FastXmlSerializer;
 import com.android.server.IoThread;
-import com.android.server.LocalServices;
 import com.android.server.job.JobSchedulerInternal.JobStorePersistStats;
 import com.android.server.job.controllers.JobStatus;
 
@@ -53,16 +56,16 @@ import org.xmlpull.v1.XmlPullParser;
 import org.xmlpull.v1.XmlPullParserException;
 import org.xmlpull.v1.XmlSerializer;
 
-import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.StringJoiner;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 
@@ -85,9 +88,10 @@ public final class JobStore {
     private static final boolean DEBUG = JobSchedulerService.DEBUG;
 
     /** Threshold to adjust how often we want to write to the db. */
-    private static final int MAX_OPS_BEFORE_WRITE = 1;
+    private static final long JOB_PERSIST_DELAY = 2000L;
 
     final Object mLock;
+    final Object mWriteScheduleLock;    // used solely for invariants around write scheduling
     final JobSet mJobSet; // per-caller-uid and per-source-uid tracking
     final Context mContext;
 
@@ -95,9 +99,14 @@ public final class JobStore {
     private final long mXmlTimestamp;
     private boolean mRtcGood;
 
-    private int mDirtyOperations;
+    @GuardedBy("mWriteScheduleLock")
+    private boolean mWriteScheduled;
+
+    @GuardedBy("mWriteScheduleLock")
+    private boolean mWriteInProgress;
 
     private static final Object sSingletonLock = new Object();
+    private final SystemConfigFileCommitEventLogger mEventLogger;
     private final AtomicFile mJobsFile;
     /** Handler backed by IoThread for writing to disk. */
     private final Handler mIoHandler = IoThread.getHandler();
@@ -122,7 +131,7 @@ public final class JobStore {
     @VisibleForTesting
     public static JobStore initAndGetForTesting(Context context, File dataDir) {
         JobStore jobStoreUnderTest = new JobStore(context, new Object(), dataDir);
-        jobStoreUnderTest.clear();
+        jobStoreUnderTest.clearForTesting();
         return jobStoreUnderTest;
     }
 
@@ -131,13 +140,14 @@ public final class JobStore {
      */
     private JobStore(Context context, Object lock, File dataDir) {
         mLock = lock;
+        mWriteScheduleLock = new Object();
         mContext = context;
-        mDirtyOperations = 0;
 
         File systemDir = new File(dataDir, "system");
         File jobDir = new File(systemDir, "job");
         jobDir.mkdirs();
-        mJobsFile = new AtomicFile(new File(jobDir, "jobs.xml"), "jobs");
+        mEventLogger = new SystemConfigFileCommitEventLogger("jobs");
+        mJobsFile = new AtomicFile(new File(jobDir, "jobs.xml"), mEventLogger);
 
         mJobSet = new JobSet();
 
@@ -182,9 +192,11 @@ public final class JobStore {
             if (utcTimes != null) {
                 Pair<Long, Long> elapsedRuntimes =
                         convertRtcBoundsToElapsed(utcTimes, elapsedNow);
-                toAdd.add(new JobStatus(job, job.getBaseHeartbeat(),
+                JobStatus newJob = new JobStatus(job,
                         elapsedRuntimes.first, elapsedRuntimes.second,
-                        0, job.getLastSuccessfulRunTime(), job.getLastFailedRunTime()));
+                        0, job.getLastSuccessfulRunTime(), job.getLastFailedRunTime());
+                newJob.prepareLocked();
+                toAdd.add(newJob);
                 toRemove.add(job);
             }
         });
@@ -208,6 +220,14 @@ public final class JobStore {
         return replaced;
     }
 
+    /**
+     * The same as above but does not schedule writing. This makes perf benchmarks more stable.
+     */
+    @VisibleForTesting
+    public void addForTesting(JobStatus jobStatus) {
+        mJobSet.add(jobStatus);
+    }
+
     boolean containsJob(JobStatus jobStatus) {
         return mJobSet.contains(jobStatus);
     }
@@ -226,10 +246,11 @@ public final class JobStore {
 
     /**
      * Remove the provided job. Will also delete the job if it was persisted.
-     * @param writeBack If true, the job will be deleted (if it was persisted) immediately.
+     * @param removeFromPersisted If true, the job will be removed from the persisted job list
+     *                            immediately (if it was persisted).
      * @return Whether or not the job existed to be removed.
      */
-    public boolean remove(JobStatus jobStatus, boolean writeBack) {
+    public boolean remove(JobStatus jobStatus, boolean removeFromPersisted) {
         boolean removed = mJobSet.remove(jobStatus);
         if (!removed) {
             if (DEBUG) {
@@ -237,24 +258,32 @@ public final class JobStore {
             }
             return false;
         }
-        if (writeBack && jobStatus.isPersisted()) {
+        if (removeFromPersisted && jobStatus.isPersisted()) {
             maybeWriteStatusToDiskAsync();
         }
         return removed;
     }
 
     /**
-     * Remove the jobs of users not specified in the whitelist.
-     * @param whitelist Array of User IDs whose jobs are not to be removed.
+     * Remove the jobs of users not specified in the keepUserIds.
+     * @param keepUserIds Array of User IDs whose jobs should be kept and not removed.
      */
-    public void removeJobsOfNonUsers(int[] whitelist) {
-        mJobSet.removeJobsOfNonUsers(whitelist);
+    public void removeJobsOfUnlistedUsers(int[] keepUserIds) {
+        mJobSet.removeJobsOfUnlistedUsers(keepUserIds);
     }
 
     @VisibleForTesting
     public void clear() {
         mJobSet.clear();
         maybeWriteStatusToDiskAsync();
+    }
+
+    /**
+     * The same as above but does not schedule writing. This makes perf benchmarks more stable.
+     */
+    @VisibleForTesting
+    public void clearForTesting() {
+        mJobSet.clear();
     }
 
     /**
@@ -306,7 +335,7 @@ public final class JobStore {
     }
 
     /** Version of the db schema. */
-    private static final int JOBS_FILE_VERSION = 0;
+    private static final int JOBS_FILE_VERSION = 1;
     /** Tag corresponds to constraints this job needs. */
     private static final String XML_TAG_PARAMS_CONSTRAINTS = "constraints";
     /** Tag corresponds to execution parameters. */
@@ -319,19 +348,91 @@ public final class JobStore {
      * track incremental changes.
      */
     private void maybeWriteStatusToDiskAsync() {
-        mDirtyOperations++;
-        if (mDirtyOperations >= MAX_OPS_BEFORE_WRITE) {
-            if (DEBUG) {
-                Slog.v(TAG, "Writing jobs to disk.");
+        synchronized (mWriteScheduleLock) {
+            if (!mWriteScheduled) {
+                if (DEBUG) {
+                    Slog.v(TAG, "Scheduling persist of jobs to disk.");
+                }
+                mIoHandler.postDelayed(mWriteRunnable, JOB_PERSIST_DELAY);
+                mWriteScheduled = true;
             }
-            mIoHandler.removeCallbacks(mWriteRunnable);
-            mIoHandler.post(mWriteRunnable);
         }
     }
 
     @VisibleForTesting
     public void readJobMapFromDisk(JobSet jobSet, boolean rtcGood) {
         new ReadJobMapFromDiskRunnable(jobSet, rtcGood).run();
+    }
+
+    /** Write persisted JobStore state to disk synchronously. Should only be used for testing. */
+    @VisibleForTesting
+    public void writeStatusToDiskForTesting() {
+        synchronized (mWriteScheduleLock) {
+            if (mWriteScheduled) {
+                throw new IllegalStateException("An asynchronous write is already scheduled.");
+            }
+
+            mWriteScheduled = true;
+            mWriteRunnable.run();
+        }
+    }
+
+    /**
+     * Wait for any pending write to the persistent store to clear
+     * @param maxWaitMillis Maximum time from present to wait
+     * @return {@code true} if I/O cleared as expected, {@code false} if the wait
+     *     timed out before the pending write completed.
+     */
+    @VisibleForTesting
+    public boolean waitForWriteToCompleteForTesting(long maxWaitMillis) {
+        final long start = SystemClock.uptimeMillis();
+        final long end = start + maxWaitMillis;
+        synchronized (mWriteScheduleLock) {
+            while (mWriteScheduled || mWriteInProgress) {
+                final long now = SystemClock.uptimeMillis();
+                if (now >= end) {
+                    // still not done and we've hit the end; failure
+                    return false;
+                }
+                try {
+                    mWriteScheduleLock.wait(now - start + maxWaitMillis);
+                } catch (InterruptedException e) {
+                    // Spurious; keep waiting
+                    break;
+                }
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Returns a single string representation of the contents of the specified intArray.
+     * If the intArray is [1, 2, 4] as the input, the return result will be the string "1,2,4".
+     */
+    @VisibleForTesting
+    static String intArrayToString(int[] values) {
+        final StringJoiner sj = new StringJoiner(",");
+        for (final int value : values) {
+            sj.add(String.valueOf(value));
+        }
+        return sj.toString();
+    }
+
+
+   /**
+    * Converts a string containing a comma-separated list of decimal representations
+    * of ints into an array of int. If the string is not correctly formatted,
+    * or if any value doesn't fit into an int, NumberFormatException is thrown.
+    */
+    @VisibleForTesting
+    static int[] stringToIntArray(String str) {
+        if (TextUtils.isEmpty(str)) return new int[0];
+        final String[] arr = str.split(",");
+        final int[] values = new int[arr.length];
+        for (int i = 0; i < arr.length; i++) {
+            values[i] = Integer.parseInt(arr[i]);
+        }
+        return values;
     }
 
     /**
@@ -343,6 +444,22 @@ public final class JobStore {
         public void run() {
             final long startElapsed = sElapsedRealtimeClock.millis();
             final List<JobStatus> storeCopy = new ArrayList<JobStatus>();
+            // Intentionally allow new scheduling of a write operation *before* we clone
+            // the job set.  If we reset it to false after cloning, there's a window in
+            // which no new write will be scheduled but mLock is not held, i.e. a new
+            // job might appear and fail to be recognized as needing a persist.  The
+            // potential cost is one redundant write of an identical set of jobs in the
+            // rare case of that specific race, but by doing it this way we avoid quite
+            // a bit of lock contention.
+            synchronized (mWriteScheduleLock) {
+                mWriteScheduled = false;
+                if (mWriteInProgress) {
+                    // Another runnable is currently writing. Postpone this new write task.
+                    maybeWriteStatusToDiskAsync();
+                    return;
+                }
+                mWriteInProgress = true;
+            }
             synchronized (mLock) {
                 // Clone the jobs so we can release the lock before writing.
                 mJobSet.forEachJob(null, (job) -> {
@@ -356,17 +473,19 @@ public final class JobStore {
                 Slog.v(TAG, "Finished writing, took " + (sElapsedRealtimeClock.millis()
                         - startElapsed) + "ms");
             }
+            synchronized (mWriteScheduleLock) {
+                mWriteInProgress = false;
+                mWriteScheduleLock.notifyAll();
+            }
         }
 
         private void writeJobsMapImpl(List<JobStatus> jobList) {
             int numJobs = 0;
             int numSystemJobs = 0;
             int numSyncJobs = 0;
-            try {
-                final long startTime = SystemClock.uptimeMillis();
-                ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                XmlSerializer out = new FastXmlSerializer();
-                out.setOutput(baos, StandardCharsets.UTF_8.name());
+            mEventLogger.setStartTime(SystemClock.uptimeMillis());
+            try (FileOutputStream fos = mJobsFile.startWrite()) {
+                TypedXmlSerializer out = Xml.resolveSerializer(fos);
                 out.startDocument(null, true);
                 out.setFeature("http://xmlpull.org/v1/doc/features.html#indent-output", true);
 
@@ -395,11 +514,7 @@ public final class JobStore {
                 out.endTag(null, "job-info");
                 out.endDocument();
 
-                // Write out to disk in one fell swoop.
-                FileOutputStream fos = mJobsFile.startWrite(startTime);
-                fos.write(baos.toByteArray());
                 mJobsFile.finishWrite(fos);
-                mDirtyOperations = 0;
             } catch (IOException e) {
                 if (DEBUG) {
                     Slog.v(TAG, "Error writing out job data.", e);
@@ -415,7 +530,8 @@ public final class JobStore {
             }
         }
 
-        /** Write out a tag with data comprising the required fields and priority of this job and
+        /**
+         * Write out a tag with data comprising the required fields and bias of this job and
          * its client.
          */
         private void addAttributesToJobTag(XmlSerializer out, JobStatus jobStatus)
@@ -431,7 +547,8 @@ public final class JobStore {
             }
             out.attribute(null, "sourceUserId", String.valueOf(jobStatus.getSourceUserId()));
             out.attribute(null, "uid", Integer.toString(jobStatus.getUid()));
-            out.attribute(null, "priority", String.valueOf(jobStatus.getPriority()));
+            out.attribute(null, "bias", String.valueOf(jobStatus.getBias()));
+            out.attribute(null, "priority", String.valueOf(jobStatus.getJob().getPriority()));
             out.attribute(null, "flags", String.valueOf(jobStatus.getFlags()));
             if (jobStatus.getInternalFlags() != 0) {
                 out.attribute(null, "internalFlags", String.valueOf(jobStatus.getInternalFlags()));
@@ -470,18 +587,20 @@ public final class JobStore {
         /**
          * Write out a tag with data identifying this job's constraints. If the constraint isn't here
          * it doesn't apply.
+         * TODO: b/183455312 Update this code to use proper serialization for NetworkRequest,
+         *       because currently store is not including everything (like, UIDs, bandwidth,
+         *       signal strength etc. are lost).
          */
         private void writeConstraintsToXml(XmlSerializer out, JobStatus jobStatus) throws IOException {
             out.startTag(null, XML_TAG_PARAMS_CONSTRAINTS);
             if (jobStatus.hasConnectivityConstraint()) {
                 final NetworkRequest network = jobStatus.getJob().getRequiredNetwork();
-                out.attribute(null, "net-capabilities", Long.toString(
-                        BitUtils.packBits(network.networkCapabilities.getCapabilities())));
-                out.attribute(null, "net-unwanted-capabilities", Long.toString(
-                        BitUtils.packBits(network.networkCapabilities.getUnwantedCapabilities())));
-
-                out.attribute(null, "net-transport-types", Long.toString(
-                        BitUtils.packBits(network.networkCapabilities.getTransportTypes())));
+                out.attribute(null, "net-capabilities-csv", intArrayToString(
+                        network.getCapabilities()));
+                out.attribute(null, "net-forbidden-capabilities-csv", intArrayToString(
+                        network.getForbiddenCapabilities()));
+                out.attribute(null, "net-transport-types-csv", intArrayToString(
+                        network.getTransportTypes()));
             }
             if (jobStatus.hasIdleConstraint()) {
                 out.attribute(null, "idle", Boolean.toString(true));
@@ -491,6 +610,9 @@ public final class JobStore {
             }
             if (jobStatus.hasBatteryNotLowConstraint()) {
                 out.attribute(null, "battery-not-low", Boolean.toString(true));
+            }
+            if (jobStatus.hasStorageNotLowConstraint()) {
+                out.attribute(null, "storage-not-low", Boolean.toString(true));
             }
             out.endTag(null, XML_TAG_PARAMS_CONSTRAINTS);
         }
@@ -592,17 +714,15 @@ public final class JobStore {
             int numJobs = 0;
             int numSystemJobs = 0;
             int numSyncJobs = 0;
-            try {
-                List<JobStatus> jobs;
-                FileInputStream fis = mJobsFile.openRead();
+            List<JobStatus> jobs;
+            try (FileInputStream fis = mJobsFile.openRead()) {
                 synchronized (mLock) {
                     jobs = readJobMapImpl(fis, rtcGood);
                     if (jobs != null) {
                         long now = sElapsedRealtimeClock.millis();
-                        IActivityManager am = ActivityManager.getService();
                         for (int i=0; i<jobs.size(); i++) {
                             JobStatus js = jobs.get(i);
-                            js.prepareLocked(am);
+                            js.prepareLocked();
                             js.enqueueTime = now;
                             this.jobSet.add(js);
 
@@ -616,7 +736,6 @@ public final class JobStore {
                         }
                     }
                 }
-                fis.close();
             } catch (FileNotFoundException e) {
                 if (DEBUG) {
                     Slog.d(TAG, "Could not find jobs file, probably there was nothing to load.");
@@ -633,10 +752,9 @@ public final class JobStore {
             Slog.i(TAG, "Read " + numJobs + " jobs");
         }
 
-        private List<JobStatus> readJobMapImpl(FileInputStream fis, boolean rtcIsGood)
+        private List<JobStatus> readJobMapImpl(InputStream fis, boolean rtcIsGood)
                 throws XmlPullParserException, IOException {
-            XmlPullParser parser = Xml.newPullParser();
-            parser.setInput(fis, StandardCharsets.UTF_8.name());
+            XmlPullParser parser = Xml.resolvePullParser(fis);
 
             int eventType = parser.getEventType();
             while (eventType != XmlPullParser.START_TAG &&
@@ -654,10 +772,11 @@ public final class JobStore {
             String tagName = parser.getName();
             if ("job-info".equals(tagName)) {
                 final List<JobStatus> jobs = new ArrayList<JobStatus>();
+                final int version;
                 // Read in version info.
                 try {
-                    int version = Integer.parseInt(parser.getAttributeValue(null, "version"));
-                    if (version != JOBS_FILE_VERSION) {
+                    version = Integer.parseInt(parser.getAttributeValue(null, "version"));
+                    if (version > JOBS_FILE_VERSION || version < 0) {
                         Slog.d(TAG, "Invalid version number, aborting jobs file read.");
                         return null;
                     }
@@ -672,7 +791,7 @@ public final class JobStore {
                         tagName = parser.getName();
                         // Start reading job.
                         if ("job".equals(tagName)) {
-                            JobStatus persistedJob = restoreJobFromXml(rtcIsGood, parser);
+                            JobStatus persistedJob = restoreJobFromXml(rtcIsGood, parser, version);
                             if (persistedJob != null) {
                                 if (DEBUG) {
                                     Slog.d(TAG, "Read out " + persistedJob);
@@ -695,23 +814,35 @@ public final class JobStore {
          *               will take the parser into the body of the job tag.
          * @return Newly instantiated job holding all the information we just read out of the xml tag.
          */
-        private JobStatus restoreJobFromXml(boolean rtcIsGood, XmlPullParser parser)
-                throws XmlPullParserException, IOException {
+        private JobStatus restoreJobFromXml(boolean rtcIsGood, XmlPullParser parser,
+                int schemaVersion) throws XmlPullParserException, IOException {
             JobInfo.Builder jobBuilder;
             int uid, sourceUserId;
             long lastSuccessfulRunTime;
             long lastFailedRunTime;
             int internalFlags = 0;
 
-            // Read out job identifier attributes and priority.
+            // Read out job identifier attributes and bias.
             try {
                 jobBuilder = buildBuilderFromXml(parser);
                 jobBuilder.setPersisted(true);
                 uid = Integer.parseInt(parser.getAttributeValue(null, "uid"));
 
-                String val = parser.getAttributeValue(null, "priority");
-                if (val != null) {
-                    jobBuilder.setPriority(Integer.parseInt(val));
+                String val;
+                if (schemaVersion == 0) {
+                    val = parser.getAttributeValue(null, "priority");
+                    if (val != null) {
+                        jobBuilder.setBias(Integer.parseInt(val));
+                    }
+                } else if (schemaVersion >= 1) {
+                    val = parser.getAttributeValue(null, "bias");
+                    if (val != null) {
+                        jobBuilder.setBias(Integer.parseInt(val));
+                    }
+                    val = parser.getAttributeValue(null, "priority");
+                    if (val != null) {
+                        jobBuilder.setPriority(Integer.parseInt(val));
+                    }
                 }
                 val = parser.getAttributeValue(null, "flags");
                 if (val != null) {
@@ -753,7 +884,14 @@ public final class JobStore {
             } catch (NumberFormatException e) {
                 Slog.d(TAG, "Error reading constraints, skipping.");
                 return null;
+            } catch (XmlPullParserException e) {
+                Slog.d(TAG, "Error Parser Exception.", e);
+                return null;
+            } catch (IOException e) {
+                Slog.d(TAG, "Error I/O Exception.", e);
+                return null;
             }
+
             parser.next(); // Consume </constraints>
 
             // Read out execution parameters tag.
@@ -852,6 +990,22 @@ public final class JobStore {
             jobBuilder.setExtras(extras);
             parser.nextTag(); // Consume </extras>
 
+            final JobInfo builtJob;
+            try {
+                // Don't perform prefetch-deadline check here. Apps targeting S- shouldn't have
+                // any prefetch-with-deadline jobs accidentally dropped. It's not worth doing
+                // target SDK version checks here for apps targeting T+. There's no way for an
+                // app to keep a perpetually scheduled prefetch job with a deadline. Prefetch jobs
+                // with a deadline would run and then any newly scheduled prefetch jobs wouldn't
+                // have a deadline. If a job is rescheduled (via jobFinished(true) or onStopJob()'s
+                // return value), the deadline is dropped. Periodic jobs require all constraints
+                // to be met, so there's no issue with their deadlines.
+                builtJob = jobBuilder.build(false);
+            } catch (Exception e) {
+                Slog.w(TAG, "Unable to build job from XML, ignoring: " + jobBuilder.summarize(), e);
+                return null;
+            }
+
             // Migrate sync jobs forward from earlier, incomplete representation
             if ("android".equals(sourcePackageName)
                     && extras != null
@@ -864,16 +1018,14 @@ public final class JobStore {
             }
 
             // And now we're done
-            JobSchedulerInternal service = LocalServices.getService(JobSchedulerInternal.class);
             final int appBucket = JobSchedulerService.standbyBucketForPackage(sourcePackageName,
                     sourceUserId, elapsedNow);
-            long currentHeartbeat = service != null ? service.currentHeartbeat() : 0;
             JobStatus js = new JobStatus(
-                    jobBuilder.build(), uid, sourcePackageName, sourceUserId,
-                    appBucket, currentHeartbeat, sourceTag,
+                    builtJob, uid, sourcePackageName, sourceUserId,
+                    appBucket, sourceTag,
                     elapsedRuntimes.first, elapsedRuntimes.second,
                     lastSuccessfulRunTime, lastFailedRunTime,
-                    (rtcIsGood) ? null : rtcRuntimes, internalFlags);
+                    (rtcIsGood) ? null : rtcRuntimes, internalFlags, /* dynamicConstraints */ 0);
             return js;
         }
 
@@ -887,26 +1039,79 @@ public final class JobStore {
             return new JobInfo.Builder(jobId, cname);
         }
 
-        private void buildConstraintsFromXml(JobInfo.Builder jobBuilder, XmlPullParser parser) {
+        /**
+         * In S, there has been a change in format to make the code more robust and more
+         * maintainable.
+         * If the capabities are bits 4, 14, 15, the format in R, it is a long string as
+         * netCapabilitiesLong = '49168' from the old XML file attribute "net-capabilities".
+         * The format in S is the int array string as netCapabilitiesIntArray = '4,14,15'
+         * from the new XML file attribute "net-capabilities-array".
+         * For backward compatibility, when reading old XML the old format is still supported in
+         * reading, but in order to avoid issues with OEM-defined flags, the accepted capabilities
+         * are limited to that(maxNetCapabilityInR & maxTransportInR) defined in R.
+         */
+        private void buildConstraintsFromXml(JobInfo.Builder jobBuilder, XmlPullParser parser)
+                throws XmlPullParserException, IOException {
             String val;
+            String netCapabilitiesLong = null;
+            String netForbiddenCapabilitiesLong = null;
+            String netTransportTypesLong = null;
 
-            final String netCapabilities = parser.getAttributeValue(null, "net-capabilities");
-            final String netUnwantedCapabilities = parser.getAttributeValue(
-                    null, "net-unwanted-capabilities");
-            final String netTransportTypes = parser.getAttributeValue(null, "net-transport-types");
-            if (netCapabilities != null && netTransportTypes != null) {
-                final NetworkRequest request = new NetworkRequest.Builder().build();
-                final long unwantedCapabilities = netUnwantedCapabilities != null
-                        ? Long.parseLong(netUnwantedCapabilities)
-                        : BitUtils.packBits(request.networkCapabilities.getUnwantedCapabilities());
+            final String netCapabilitiesIntArray = parser.getAttributeValue(
+                    null, "net-capabilities-csv");
+            final String netForbiddenCapabilitiesIntArray = parser.getAttributeValue(
+                    null, "net-forbidden-capabilities-csv");
+            final String netTransportTypesIntArray = parser.getAttributeValue(
+                    null, "net-transport-types-csv");
+            if (netCapabilitiesIntArray == null || netTransportTypesIntArray == null) {
+                netCapabilitiesLong = parser.getAttributeValue(null, "net-capabilities");
+                netForbiddenCapabilitiesLong = parser.getAttributeValue(
+                        null, "net-unwanted-capabilities");
+                netTransportTypesLong = parser.getAttributeValue(null, "net-transport-types");
+            }
 
+            if ((netCapabilitiesIntArray != null) && (netTransportTypesIntArray != null)) {
+                final NetworkRequest.Builder builder = new NetworkRequest.Builder()
+                        .clearCapabilities();
+
+                for (int capability : stringToIntArray(netCapabilitiesIntArray)) {
+                    builder.addCapability(capability);
+                }
+
+                for (int forbiddenCapability : stringToIntArray(netForbiddenCapabilitiesIntArray)) {
+                    builder.addForbiddenCapability(forbiddenCapability);
+                }
+
+                for (int transport : stringToIntArray(netTransportTypesIntArray)) {
+                    builder.addTransportType(transport);
+                }
+                jobBuilder.setRequiredNetwork(builder.build());
+            } else if (netCapabilitiesLong != null && netTransportTypesLong != null) {
+                final NetworkRequest.Builder builder = new NetworkRequest.Builder()
+                        .clearCapabilities();
+                final int maxNetCapabilityInR = NET_CAPABILITY_TEMPORARILY_NOT_METERED;
                 // We're okay throwing NFE here; caught by caller
-                request.networkCapabilities.setCapabilities(
-                        BitUtils.unpackBits(Long.parseLong(netCapabilities)),
-                        BitUtils.unpackBits(unwantedCapabilities));
-                request.networkCapabilities.setTransportTypes(
-                        BitUtils.unpackBits(Long.parseLong(netTransportTypes)));
-                jobBuilder.setRequiredNetwork(request);
+                for (int capability : BitUtils.unpackBits(Long.parseLong(
+                        netCapabilitiesLong))) {
+                    if (capability <= maxNetCapabilityInR) {
+                        builder.addCapability(capability);
+                    }
+                }
+                for (int forbiddenCapability : BitUtils.unpackBits(Long.parseLong(
+                        netForbiddenCapabilitiesLong))) {
+                    if (forbiddenCapability <= maxNetCapabilityInR) {
+                        builder.addForbiddenCapability(forbiddenCapability);
+                    }
+                }
+
+                final int maxTransportInR = TRANSPORT_TEST;
+                for (int transport : BitUtils.unpackBits(Long.parseLong(
+                        netTransportTypesLong))) {
+                    if (transport <= maxTransportInR) {
+                        builder.addTransportType(transport);
+                    }
+                }
+                jobBuilder.setRequiredNetwork(builder.build());
             } else {
                 // Read legacy values
                 val = parser.getAttributeValue(null, "connectivity");
@@ -934,6 +1139,14 @@ public final class JobStore {
             val = parser.getAttributeValue(null, "charging");
             if (val != null) {
                 jobBuilder.setRequiresCharging(true);
+            }
+            val = parser.getAttributeValue(null, "battery-not-low");
+            if (val != null) {
+                jobBuilder.setRequiresBatteryNotLow(true);
+            }
+            val = parser.getAttributeValue(null, "storage-not-low");
+            if (val != null) {
+                jobBuilder.setRequiresStorageNotLow(true);
             }
         }
 
@@ -976,41 +1189,11 @@ public final class JobStore {
                     : JobStatus.NO_LATEST_RUNTIME;
             return Pair.create(earliestRunTimeRtc, latestRunTimeRtc);
         }
-
-        /**
-         * Convenience function to read out and convert deadline and delay from xml into elapsed real
-         * time.
-         * @return A {@link android.util.Pair}, where the first value is the earliest elapsed runtime
-         * and the second is the latest elapsed runtime.
-         */
-        private Pair<Long, Long> buildExecutionTimesFromXml(XmlPullParser parser)
-                throws NumberFormatException {
-            // Pull out execution time data.
-            final long nowWallclock = sSystemClock.millis();
-            final long nowElapsed = sElapsedRealtimeClock.millis();
-
-            long earliestRunTimeElapsed = JobStatus.NO_EARLIEST_RUNTIME;
-            long latestRunTimeElapsed = JobStatus.NO_LATEST_RUNTIME;
-            String val = parser.getAttributeValue(null, "deadline");
-            if (val != null) {
-                long latestRuntimeWallclock = Long.parseLong(val);
-                long maxDelayElapsed =
-                        Math.max(latestRuntimeWallclock - nowWallclock, 0);
-                latestRunTimeElapsed = nowElapsed + maxDelayElapsed;
-            }
-            val = parser.getAttributeValue(null, "delay");
-            if (val != null) {
-                long earliestRuntimeWallclock = Long.parseLong(val);
-                long minDelayElapsed =
-                        Math.max(earliestRuntimeWallclock - nowWallclock, 0);
-                earliestRunTimeElapsed = nowElapsed + minDelayElapsed;
-
-            }
-            return Pair.create(earliestRunTimeElapsed, latestRunTimeElapsed);
-        }
     }
 
-    static final class JobSet {
+    /** Set of all tracked jobs. */
+    @VisibleForTesting
+    public static final class JobSet {
         @VisibleForTesting // Key is the getUid() originator of the jobs in each sheaf
         final SparseArray<ArraySet<JobStatus>> mJobs;
 
@@ -1092,37 +1275,28 @@ public final class JobStore {
         }
 
         /**
-         * Removes the jobs of all users not specified by the whitelist of user ids.
-         * This will remove jobs scheduled *by* non-existent users as well as jobs scheduled *for*
-         * non-existent users
+         * Removes the jobs of all users not specified by the keepUserIds of user ids.
+         * This will remove jobs scheduled *by* and *for* any unlisted users.
          */
-        public void removeJobsOfNonUsers(final int[] whitelist) {
+        public void removeJobsOfUnlistedUsers(final int[] keepUserIds) {
             final Predicate<JobStatus> noSourceUser =
-                    job -> !ArrayUtils.contains(whitelist, job.getSourceUserId());
+                    job -> !ArrayUtils.contains(keepUserIds, job.getSourceUserId());
             final Predicate<JobStatus> noCallingUser =
-                    job -> !ArrayUtils.contains(whitelist, job.getUserId());
+                    job -> !ArrayUtils.contains(keepUserIds, job.getUserId());
             removeAll(noSourceUser.or(noCallingUser));
         }
 
         private void removeAll(Predicate<JobStatus> predicate) {
             for (int jobSetIndex = mJobs.size() - 1; jobSetIndex >= 0; jobSetIndex--) {
                 final ArraySet<JobStatus> jobs = mJobs.valueAt(jobSetIndex);
-                for (int jobIndex = jobs.size() - 1; jobIndex >= 0; jobIndex--) {
-                    if (predicate.test(jobs.valueAt(jobIndex))) {
-                        jobs.removeAt(jobIndex);
-                    }
-                }
+                jobs.removeIf(predicate);
                 if (jobs.size() == 0) {
                     mJobs.removeAt(jobSetIndex);
                 }
             }
             for (int jobSetIndex = mJobsPerSourceUid.size() - 1; jobSetIndex >= 0; jobSetIndex--) {
                 final ArraySet<JobStatus> jobs = mJobsPerSourceUid.valueAt(jobSetIndex);
-                for (int jobIndex = jobs.size() - 1; jobIndex >= 0; jobIndex--) {
-                    if (predicate.test(jobs.valueAt(jobIndex))) {
-                        jobs.removeAt(jobIndex);
-                    }
-                }
+                jobs.removeIf(predicate);
                 if (jobs.size() == 0) {
                     mJobsPerSourceUid.removeAt(jobSetIndex);
                 }

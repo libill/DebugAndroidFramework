@@ -16,12 +16,12 @@
 
 package com.android.internal.usb;
 
-import static android.hardware.usb.UsbPort.MODE_AUDIO_ACCESSORY;
-import static android.hardware.usb.UsbPort.MODE_DEBUG_ACCESSORY;
-import static android.hardware.usb.UsbPort.MODE_DFP;
-import static android.hardware.usb.UsbPort.MODE_DUAL;
-import static android.hardware.usb.UsbPort.MODE_NONE;
-import static android.hardware.usb.UsbPort.MODE_UFP;
+import static android.hardware.usb.UsbPortStatus.MODE_AUDIO_ACCESSORY;
+import static android.hardware.usb.UsbPortStatus.MODE_DEBUG_ACCESSORY;
+import static android.hardware.usb.UsbPortStatus.MODE_DFP;
+import static android.hardware.usb.UsbPortStatus.MODE_DUAL;
+import static android.hardware.usb.UsbPortStatus.MODE_NONE;
+import static android.hardware.usb.UsbPortStatus.MODE_UFP;
 
 import static com.android.internal.util.dump.DumpUtils.writeStringIfNotNull;
 
@@ -196,6 +196,15 @@ public class DumpUtils {
         }
     }
 
+    private static void writeContaminantPresenceStatus(@NonNull DualDumpOutputStream dump,
+            @NonNull String idName, long id, int contaminantPresenceStatus) {
+        if (dump.isProto()) {
+            dump.write(idName, id, contaminantPresenceStatus);
+        } else {
+            dump.write(idName, id,
+                    UsbPort.contaminantPresenceStatusToString(contaminantPresenceStatus));
+        }
+    }
 
     public static void writePortStatus(@NonNull DualDumpOutputStream dump, @NonNull String idName,
             long id, @NonNull UsbPortStatus status) {
@@ -232,6 +241,15 @@ public class DumpUtils {
             dump.end(roleCombinationToken);
         }
 
+        writeContaminantPresenceStatus(dump, "contaminant_presence_status",
+                UsbPortStatusProto.CONTAMINANT_PRESENCE_STATUS,
+                status.getContaminantDetectionStatus());
+        dump.write("usb_data_status", UsbPortStatusProto.USB_DATA_STATUS,
+                UsbPort.usbDataStatusToString(status.getUsbDataStatus()));
+        dump.write("is_power_transfer_limited", UsbPortStatusProto.IS_POWER_TRANSFER_LIMITED,
+                status.isPowerTransferLimited());
+        dump.write("usb_power_brick_status", UsbPortStatusProto.USB_POWER_BRICK_STATUS,
+                UsbPort.powerBrickConnectionStatusToString(status.getPowerBrickConnectionStatus()));
         dump.end(token);
     }
 }

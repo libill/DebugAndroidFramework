@@ -15,15 +15,13 @@
  */
 package android.accounts;
 
-import com.google.android.collect.Sets;
+import static android.app.admin.DevicePolicyResources.Strings.Core.CANT_ADD_ACCOUNT_MESSAGE;
 
 import android.app.Activity;
-import android.app.ActivityManager;
+import android.app.admin.DevicePolicyManager;
 import android.content.Intent;
 import android.os.Bundle;
-import android.os.IBinder;
 import android.os.Parcelable;
-import android.os.RemoteException;
 import android.os.UserHandle;
 import android.os.UserManager;
 import android.text.TextUtils;
@@ -37,6 +35,8 @@ import android.widget.ListView;
 import android.widget.TextView;
 
 import com.android.internal.R;
+
+import com.google.android.collect.Sets;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -142,23 +142,17 @@ public class ChooseTypeAndAccountActivity extends Activity
             Log.v(TAG, "ChooseTypeAndAccountActivity.onCreate(savedInstanceState="
                     + savedInstanceState + ")");
         }
+        getWindow().addSystemFlags(
+                android.view.WindowManager.LayoutParams
+                        .SYSTEM_FLAG_HIDE_NON_SYSTEM_OVERLAY_WINDOWS);
 
-        String message = null;
-
-        try {
-            IBinder activityToken = getActivityToken();
-            mCallingUid = ActivityManager.getService().getLaunchedFromUid(activityToken);
-            mCallingPackage = ActivityManager.getService().getLaunchedFromPackage(
-                    activityToken);
-            if (mCallingUid != 0 && mCallingPackage != null) {
-                Bundle restrictions = UserManager.get(this)
-                        .getUserRestrictions(new UserHandle(UserHandle.getUserId(mCallingUid)));
-                mDisallowAddAccounts =
-                        restrictions.getBoolean(UserManager.DISALLOW_MODIFY_ACCOUNTS, false);
-            }
-        } catch (RemoteException re) {
-            // Couldn't figure out caller details
-            Log.w(getClass().getSimpleName(), "Unable to get caller identity \n" + re);
+        mCallingUid = getLaunchedFromUid();
+        mCallingPackage = getLaunchedFromPackage();
+        if (mCallingUid != 0 && mCallingPackage != null) {
+            Bundle restrictions = UserManager.get(this)
+                    .getUserRestrictions(new UserHandle(UserHandle.getUserId(mCallingUid)));
+            mDisallowAddAccounts =
+                    restrictions.getBoolean(UserManager.DISALLOW_MODIFY_ACCOUNTS, false);
         }
 
         // save some items we use frequently
@@ -199,10 +193,6 @@ public class ChooseTypeAndAccountActivity extends Activity
             mAccounts = getAcceptableAccountChoices(AccountManager.get(this));
         }
 
-        if (Log.isLoggable(TAG, Log.VERBOSE)) {
-            Log.v(TAG, "selected account name is " + mSelectedAccountName);
-        }
-
         mPossiblyVisibleAccounts = new ArrayList<>(mAccounts.size());
         for (Map.Entry<Account, Integer> entry : mAccounts.entrySet()) {
             if (AccountManager.VISIBILITY_NOT_VISIBLE != entry.getValue()) {
@@ -212,7 +202,14 @@ public class ChooseTypeAndAccountActivity extends Activity
 
         if (mPossiblyVisibleAccounts.isEmpty() && mDisallowAddAccounts) {
             requestWindowFeature(Window.FEATURE_NO_TITLE);
+
             setContentView(R.layout.app_not_authorized);
+            TextView view = findViewById(R.id.description);
+            String text = getSystemService(DevicePolicyManager.class).getResources().getString(
+                    CANT_ADD_ACCOUNT_MESSAGE,
+                    () -> getString(R.string.error_message_change_not_allowed));
+            view.setText(text);
+
             mDontShowPicker = true;
         }
 
@@ -311,7 +308,7 @@ public class ChooseTypeAndAccountActivity extends Activity
             if (data != null && data.getExtras() != null) data.getExtras().keySet();
             Bundle extras = data != null ? data.getExtras() : null;
             Log.v(TAG, "ChooseTypeAndAccountActivity.onActivityResult(reqCode=" + requestCode
-                    + ", resCode=" + resultCode + ", extras=" + extras + ")");
+                    + ", resCode=" + resultCode + ")");
         }
 
         // we got our result, so clear the fact that we had a pending request
@@ -433,8 +430,8 @@ public class ChooseTypeAndAccountActivity extends Activity
     }
 
     private void onAccountSelected(Account account) {
-      Log.d(TAG, "selected account " + account);
-      setResultAndFinish(account.name, account.type);
+        Log.d(TAG, "selected account " + account.toSafeString());
+        setResultAndFinish(account.name, account.type);
     }
 
     private void setResultAndFinish(final String accountName, final String accountType) {
@@ -460,9 +457,8 @@ public class ChooseTypeAndAccountActivity extends Activity
         setResult(Activity.RESULT_OK, new Intent().putExtras(bundle));
         if (Log.isLoggable(TAG, Log.VERBOSE)) {
             Log.v(TAG, "ChooseTypeAndAccountActivity.setResultAndFinish: selected account "
-                    + accountName + ", " + accountType);
+                    + account.toSafeString());
         }
-
         finish();
     }
 
@@ -571,7 +567,7 @@ public class ChooseTypeAndAccountActivity extends Activity
     }
 
     /**
-     * Returns a set of whitelisted accounts given by the intent or null if none specified by the
+     * Returns a set of allowlisted accounts given by the intent or null if none specified by the
      * intent.
      */
     private Set<Account> getAllowableAccountSet(final Intent intent) {

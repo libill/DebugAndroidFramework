@@ -7,9 +7,13 @@ import android.annotation.Nullable;
 import android.content.Context;
 import android.net.NetworkCapabilities;
 import android.util.Log;
+
 import com.android.clockwork.common.DebugAssert;
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.util.IndentingPrintWriter;
+
+import java.net.InetAddress;
+import java.util.List;
 
 /**
  * Helper class that interfaces with {@link ConnectivityService} and companion proxy
@@ -24,7 +28,7 @@ public class ProxyServiceHelper {
     public static final int CAPABILITIES_UPSTREAM_BANDWIDTH_KBPS = 1600;
     public static final int CAPABILITIES_DOWNSTREAM_BANDWIDTH_KBPS = 1600;
 
-    @VisibleForTesting final NetworkCapabilities mCapabilities;
+    @VisibleForTesting final NetworkCapabilities.Builder mCapabilitiesBlder;
 
     private final ProxyNetworkFactory mProxyNetworkFactory;
     private final ProxyNetworkAgent mProxyNetworkAgent;
@@ -33,16 +37,17 @@ public class ProxyServiceHelper {
 
     public ProxyServiceHelper(
             final Context context,
-            final NetworkCapabilities capabilities,
+            final NetworkCapabilities.Builder capabilitiesBlder,
             final ProxyLinkProperties proxyLinkProperties) {
         DebugAssert.isMainThread();
 
-        mCapabilities = capabilities;
+        mCapabilitiesBlder = capabilitiesBlder;
 
         buildCapabilities();
 
-        mProxyNetworkAgent = buildProxyNetworkAgent(context, mCapabilities, proxyLinkProperties);
-        mProxyNetworkFactory = buildProxyNetworkFactory(context, mCapabilities);
+        mProxyNetworkAgent =
+            buildProxyNetworkAgent(context, mCapabilitiesBlder.build(), proxyLinkProperties);
+        mProxyNetworkFactory = buildProxyNetworkFactory(context, mCapabilitiesBlder.build());
 
         if (Log.isLoggable(TAG, Log.DEBUG)) {
             Log.d(TAG, "Created proxy network service manager");
@@ -93,11 +98,11 @@ public class ProxyServiceHelper {
     public void setMetered(final boolean isMetered) {
         DebugAssert.isMainThread();
         if (isMetered) {
-            mCapabilities.removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED);
+            mCapabilitiesBlder.removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED);
         } else {
-            mCapabilities.addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED);
+            mCapabilitiesBlder.addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED);
         }
-        mProxyNetworkAgent.sendCapabilities(mCapabilities);
+        mProxyNetworkAgent.sendCapabilities(mCapabilitiesBlder.build());
     }
 
     /**
@@ -115,6 +120,13 @@ public class ProxyServiceHelper {
         return mProxyNetworkAgent.getNetworkScore();
     }
 
+    /**
+     * Updates DNS Servers used by proxy.
+     */
+    public void setDnsServers(List<InetAddress> dnsServers) {
+        mProxyNetworkAgent.setDnsServers(dnsServers);
+    }
+
     @MainThread
     public void setCompanionName(@Nullable final String companionName) {
         DebugAssert.isMainThread();
@@ -122,19 +134,19 @@ public class ProxyServiceHelper {
     }
 
     private void buildCapabilities() {
-        mCapabilities.addTransportType(NetworkCapabilities.TRANSPORT_BLUETOOTH);
+        mCapabilitiesBlder.addTransportType(NetworkCapabilities.TRANSPORT_BLUETOOTH);
 
-        mCapabilities.addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
-        mCapabilities.addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED);
-        mCapabilities.addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_ROAMING);
-        mCapabilities.addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_CONGESTED);
+        mCapabilitiesBlder.addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
+        mCapabilitiesBlder.addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED);
+        mCapabilitiesBlder.addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_ROAMING);
+        mCapabilitiesBlder.addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_CONGESTED);
         addNetworkCapabilitiesBandwidth();
     }
 
     @VisibleForTesting
     void addNetworkCapabilitiesBandwidth() {
-        mCapabilities.setLinkUpstreamBandwidthKbps(CAPABILITIES_UPSTREAM_BANDWIDTH_KBPS);
-        mCapabilities.setLinkDownstreamBandwidthKbps(CAPABILITIES_DOWNSTREAM_BANDWIDTH_KBPS);
+        mCapabilitiesBlder.setLinkUpstreamBandwidthKbps(CAPABILITIES_UPSTREAM_BANDWIDTH_KBPS);
+        mCapabilitiesBlder.setLinkDownstreamBandwidthKbps(CAPABILITIES_DOWNSTREAM_BANDWIDTH_KBPS);
     }
 
     @VisibleForTesting

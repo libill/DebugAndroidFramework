@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2014 The Android Open Source Project
- * Copyright (c) 1996, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1996, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -39,15 +39,21 @@
 
 package java.util;
 
-import org.apache.harmony.luni.internal.util.TimezoneGetter;
 import android.icu.text.TimeZoneNames;
+import com.android.i18n.timezone.ZoneInfoData;
+import com.android.i18n.timezone.ZoneInfoDb;
+import com.android.icu.util.ExtendedTimeZone;
+
 import java.io.IOException;
 import java.io.Serializable;
 import java.time.ZoneId;
+import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import libcore.io.IoUtils;
-import libcore.util.ZoneInfoDB;
+import libcore.util.ZoneInfo;
+
+import dalvik.system.RuntimeHooks;
 
 /**
  * <code>TimeZone</code> represents a time zone offset, and also figures out daylight
@@ -75,7 +81,7 @@ import libcore.util.ZoneInfoDB;
  * produce a TimeZone. The syntax of a custom time zone ID is:
  *
  * <blockquote><pre>
- * <a name="CustomID"><i>CustomID:</i></a>
+ * <a id="CustomID"><i>CustomID:</i></a>
  *         <code>GMT</code> <i>Sign</i> <i>Hours</i> <code>:</code> <i>Minutes</i>
  *         <code>GMT</code> <i>Sign</i> <i>Hours</i> <i>Minutes</i>
  *         <code>GMT</code> <i>Sign</i> <i>Hours</i>
@@ -103,7 +109,7 @@ import libcore.util.ZoneInfoDB;
  * When creating a <code>TimeZone</code>, the specified custom time
  * zone ID is normalized in the following syntax:
  * <blockquote><pre>
- * <a name="NormalizedCustomID"><i>NormalizedCustomID:</i></a>
+ * <a id="NormalizedCustomID"><i>NormalizedCustomID:</i></a>
  *         <code>GMT</code> <i>Sign</i> <i>TwoDigitHours</i> <code>:</code> <i>Minutes</i>
  * <i>Sign:</i> one of
  *         <code>+ -</code>
@@ -130,9 +136,9 @@ import libcore.util.ZoneInfoDB;
  * @see          GregorianCalendar
  * @see          SimpleTimeZone
  * @author       Mark Davis, David Goldsmith, Chen-Lieh Huang, Alan Liu
- * @since        JDK1.1
+ * @since        1.1
  */
-abstract public class TimeZone implements Serializable, Cloneable {
+public abstract class TimeZone implements Serializable, Cloneable {
     /**
      * Sole constructor.  (For invocation by subclass constructors, typically
      * implicit.)
@@ -260,7 +266,7 @@ abstract public class TimeZone implements Serializable, Cloneable {
      *
      * @param offsetMillis the given base time zone offset to GMT.
      */
-    abstract public void setRawOffset(int offsetMillis);
+    public abstract void setRawOffset(int offsetMillis);
 
     /**
      * Returns the amount of time in milliseconds to add to UTC to get
@@ -542,7 +548,7 @@ abstract public class TimeZone implements Serializable, Cloneable {
      * @return {@code true} if the given date is in Daylight Saving Time,
      *         {@code false}, otherwise.
      */
-    abstract public boolean inDaylightTime(Date date);
+    public abstract boolean inDaylightTime(Date date);
 
     /**
      * Gets the <code>TimeZone</code> for the given ID.
@@ -555,7 +561,7 @@ abstract public class TimeZone implements Serializable, Cloneable {
      * @return the specified <code>TimeZone</code>, or the GMT zone if the given ID
      * cannot be understood.
      */
-    // Android-changed: param s/ID/id; use ZoneInfoDB instead of ZoneInfo class.
+    // Android-changed: param s/ID/id; use ZoneInfoDb instead of ZoneInfo class.
     public static synchronized TimeZone getTimeZone(String id) {
         if (id == null) {
             throw new NullPointerException("id == null");
@@ -572,11 +578,9 @@ abstract public class TimeZone implements Serializable, Cloneable {
         }
 
         // In the database?
-        TimeZone zone = null;
-        try {
-            zone = ZoneInfoDB.getInstance().makeTimeZone(id);
-        } catch (IOException ignored) {
-        }
+
+        ZoneInfoData zoneInfoData = ZoneInfoDb.getInstance().makeZoneInfoData(id);
+        TimeZone zone = zoneInfoData == null ? null : ZoneInfo.createZoneInfo(zoneInfoData);
 
         // Custom time zone?
         if (zone == null && id.length() > 3 && id.startsWith("GMT")) {
@@ -664,7 +668,7 @@ abstract public class TimeZone implements Serializable, Cloneable {
      * @see #getRawOffset()
      */
     public static synchronized String[] getAvailableIDs(int rawOffset) {
-        return ZoneInfoDB.getInstance().getAvailableIDs(rawOffset);
+        return ZoneInfoDb.getInstance().getAvailableIDs(rawOffset);
     }
 
     /**
@@ -672,7 +676,7 @@ abstract public class TimeZone implements Serializable, Cloneable {
      * @return an array of IDs.
      */
     public static synchronized String[] getAvailableIDs() {
-        return ZoneInfoDB.getInstance().getAvailableIDs();
+        return ZoneInfoDb.getInstance().getAvailableIDs();
     }
 
     /**
@@ -704,8 +708,8 @@ abstract public class TimeZone implements Serializable, Cloneable {
      */
     static synchronized TimeZone getDefaultRef() {
         if (defaultTimeZone == null) {
-            TimezoneGetter tzGetter = TimezoneGetter.getInstance();
-            String zoneName = (tzGetter != null) ? tzGetter.getId() : null;
+            Supplier<String> tzGetter = RuntimeHooks.getTimeZoneIdSupplier();
+            String zoneName = (tzGetter != null) ? tzGetter.get() : null;
             if (zoneName != null) {
                 zoneName = zoneName.trim();
             }
@@ -743,7 +747,7 @@ abstract public class TimeZone implements Serializable, Cloneable {
         }
         defaultTimeZone = timeZone != null ? (TimeZone) timeZone.clone() : null;
         // Android-changed: notify ICU4J of changed default TimeZone.
-        android.icu.util.TimeZone.setICUDefault(null);
+        ExtendedTimeZone.clearDefaultTimeZone();
     }
 
     /**
@@ -768,9 +772,7 @@ abstract public class TimeZone implements Serializable, Cloneable {
     public Object clone()
     {
         try {
-            TimeZone other = (TimeZone) super.clone();
-            other.ID = ID;
-            return other;
+            return super.clone();
         } catch (CloneNotSupportedException e) {
             throw new InternalError(e);
         }

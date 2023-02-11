@@ -16,7 +16,11 @@
 
 package android.graphics;
 
+import android.annotation.IntDef;
 import android.annotation.NonNull;
+
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
 
 /**
  * Shader used to draw a bitmap as a texture. The bitmap can be repeated or
@@ -25,13 +29,78 @@ import android.annotation.NonNull;
 public class BitmapShader extends Shader {
     /**
      * Prevent garbage collection.
-     * @hide
      */
-    @SuppressWarnings({"FieldCanBeLocal", "UnusedDeclaration"})
-    public Bitmap mBitmap;
+    /*package*/ Bitmap mBitmap;
 
     private int mTileX;
     private int mTileY;
+
+    /** @hide */
+    @IntDef(prefix = {"FILTER_MODE"}, value = {
+            FILTER_MODE_DEFAULT,
+            FILTER_MODE_NEAREST,
+            FILTER_MODE_LINEAR
+    })
+    @Retention(RetentionPolicy.SOURCE)
+    public @interface FilterMode {}
+
+    /**
+     * This FilterMode value will respect the value of the Paint#isFilterBitmap flag while the
+     * shader is attached to the Paint.
+     *
+     * <p>The exception to this rule is when a Shader is attached as input to a RuntimeShader. In
+     *    that case this mode will default to FILTER_MODE_NEAREST.</p>
+     *
+     * @see #setFilterMode(int)
+     */
+    public static final int FILTER_MODE_DEFAULT = 0;
+    /**
+     * This FilterMode value will cause the shader to sample from the nearest pixel to the requested
+     * sample point.
+     *
+     * <p>This value will override the effect of Paint#isFilterBitmap.</p>
+     *
+     * @see #setFilterMode(int)
+     */
+    public static final int FILTER_MODE_NEAREST = 1;
+    /**
+     * This FilterMode value will cause the shader to interpolate the output of the shader from a
+     * 2x2 grid of pixels nearest to the sample point (i.e. bilinear interpolation).
+     *
+     * <p>This value will override the effect of Paint#isFilterBitmap.</p>
+     *
+     * @see #setFilterMode(int)
+     */
+    public static final int FILTER_MODE_LINEAR = 2;
+
+    @FilterMode
+    private int mFilterMode;
+
+    /*
+     *  This is cache of the last value from the Paint of bitmap-filtering.
+     *  In the future, BitmapShaders will carry their own (expanded) data for this
+     *  (e.g. including mipmap options, or bicubic weights)
+     *
+     *  When that happens, this bool will become those extended values, and we will
+     *  need to track whether this Shader was created with those new constructors,
+     *  or from the current "legacy" constructor, which (for compatibility) will
+     *  still need to know the Paint's setting.
+     *
+     *  When the filter Paint setting is finally gone, we will be able to remove
+     *  the filterFromPaint parameter currently being passed to createNativeInstance()
+     *  and shouldDiscardNativeInstance(), as shaders will always know their filter
+     *  settings.
+     */
+    private boolean mFilterFromPaint;
+
+    /**
+     *  Stores whether or not the contents of this shader's bitmap will be sampled
+     *  without modification or if the bitmap's properties, like colorspace and
+     *  premultiplied alpha, will be respected when sampling from the bitmap's buffer.
+     */
+    private boolean mIsDirectSampled;
+
+    private boolean mRequestDirectSampling;
 
     /**
      * Call this to create a new shader that will draw with a bitmap.
@@ -48,29 +117,63 @@ public class BitmapShader extends Shader {
         if (bitmap == null) {
             throw new IllegalArgumentException("Bitmap must be non-null");
         }
-        if (bitmap == mBitmap && tileX == mTileX && tileY == mTileY) {
-            return;
-        }
         mBitmap = bitmap;
         mTileX = tileX;
         mTileY = tileY;
-    }
-
-    @Override
-    long createNativeInstance(long nativeMatrix) {
-        return nativeCreate(nativeMatrix, mBitmap, mTileX, mTileY);
+        mFilterMode = FILTER_MODE_DEFAULT;
+        mFilterFromPaint = false;
+        mIsDirectSampled = false;
+        mRequestDirectSampling = false;
     }
 
     /**
-     * @hide
+     * Returns the filter mode used when sampling from this shader
      */
-    @Override
-    protected Shader copy() {
-        final BitmapShader copy = new BitmapShader(mBitmap, mTileX, mTileY);
-        copyLocalMatrix(copy);
-        return copy;
+    @FilterMode
+    public int getFilterMode() {
+        return mFilterMode;
     }
 
-    private static native long nativeCreate(long nativeMatrix, Bitmap bitmap,
-            int shaderTileModeX, int shaderTileModeY);
+    /**
+     * Set the filter mode to be used when sampling from this shader
+     */
+    public void setFilterMode(@FilterMode int mode) {
+        if (mode != mFilterMode) {
+            mFilterMode = mode;
+            discardNativeInstance();
+        }
+    }
+
+    /** @hide */
+    /* package */ synchronized long getNativeInstanceWithDirectSampling() {
+        mRequestDirectSampling = true;
+        return getNativeInstance();
+    }
+
+    /** @hide */
+    @Override
+    protected long createNativeInstance(long nativeMatrix, boolean filterFromPaint) {
+        boolean enableLinearFilter = mFilterMode == FILTER_MODE_LINEAR;
+        if (mFilterMode == FILTER_MODE_DEFAULT) {
+            mFilterFromPaint = filterFromPaint;
+            enableLinearFilter = mFilterFromPaint;
+        }
+
+        mIsDirectSampled = mRequestDirectSampling;
+        mRequestDirectSampling = false;
+
+        return nativeCreate(nativeMatrix, mBitmap.getNativeInstance(), mTileX, mTileY,
+                            enableLinearFilter, mIsDirectSampled);
+    }
+
+    /** @hide */
+    @Override
+    protected boolean shouldDiscardNativeInstance(boolean filterFromPaint) {
+        return mIsDirectSampled != mRequestDirectSampling
+                || (mFilterMode == FILTER_MODE_DEFAULT && mFilterFromPaint != filterFromPaint);
+    }
+
+    private static native long nativeCreate(long nativeMatrix, long bitmapHandle,
+            int shaderTileModeX, int shaderTileModeY, boolean filter, boolean isDirectSampled);
 }
+

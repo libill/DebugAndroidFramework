@@ -16,9 +16,14 @@
 
 package android.view.inputmethod;
 
+import android.annotation.IntRange;
+import android.annotation.NonNull;
+import android.annotation.Nullable;
 import android.os.Bundle;
 import android.os.Handler;
 import android.view.KeyEvent;
+
+import com.android.internal.util.Preconditions;
 
 /**
  * <p>Wrapper class for proxying calls to another InputConnection.  Subclass and have fun!
@@ -26,8 +31,6 @@ import android.view.KeyEvent;
 public class InputConnectionWrapper implements InputConnection {
     private InputConnection mTarget;
     final boolean mMutable;
-    @InputConnectionInspector.MissingMethodFlags
-    private int mMissingMethodFlags;
 
     /**
      * Initializes a wrapper.
@@ -42,7 +45,6 @@ public class InputConnectionWrapper implements InputConnection {
     public InputConnectionWrapper(InputConnection target, boolean mutable) {
         mMutable = mutable;
         mTarget = target;
-        mMissingMethodFlags = InputConnectionInspector.getMissingMethodFlags(target);
     }
 
     /**
@@ -59,32 +61,29 @@ public class InputConnectionWrapper implements InputConnection {
             throw new SecurityException("not mutable");
         }
         mTarget = target;
-        mMissingMethodFlags = InputConnectionInspector.getMissingMethodFlags(target);
-    }
-
-    /**
-     * @hide
-     */
-    @InputConnectionInspector.MissingMethodFlags
-    public int getMissingMethodFlags() {
-        return mMissingMethodFlags;
     }
 
     /**
      * {@inheritDoc}
      * @throws NullPointerException if the target is {@code null}.
+     * @throws IllegalArgumentException if {@code length} is negative.
      */
+    @Nullable
     @Override
-    public CharSequence getTextBeforeCursor(int n, int flags) {
+    public CharSequence getTextBeforeCursor(@IntRange(from = 0) int n, int flags) {
+        Preconditions.checkArgumentNonnegative(n);
         return mTarget.getTextBeforeCursor(n, flags);
     }
 
     /**
      * {@inheritDoc}
      * @throws NullPointerException if the target is {@code null}.
+     * @throws IllegalArgumentException if {@code length} is negative.
      */
+    @Nullable
     @Override
-    public CharSequence getTextAfterCursor(int n, int flags) {
+    public CharSequence getTextAfterCursor(@IntRange(from = 0) int n, int flags) {
+        Preconditions.checkArgumentNonnegative(n);
         return mTarget.getTextAfterCursor(n, flags);
     }
 
@@ -95,6 +94,19 @@ public class InputConnectionWrapper implements InputConnection {
     @Override
     public CharSequence getSelectedText(int flags) {
         return mTarget.getSelectedText(flags);
+    }
+
+    /**
+     * {@inheritDoc}
+     * @throws NullPointerException if the target is {@code null}.
+     * @throws IllegalArgumentException if {@code beforeLength} or {@code afterLength} is negative.
+     */
+    @Nullable
+    @Override
+    public SurroundingText getSurroundingText(int beforeLength, int afterLength, int flags) {
+        Preconditions.checkArgumentNonnegative(beforeLength);
+        Preconditions.checkArgumentNonnegative(afterLength);
+        return mTarget.getSurroundingText(beforeLength, afterLength, flags);
     }
 
     /**
@@ -147,8 +159,27 @@ public class InputConnectionWrapper implements InputConnection {
      * @throws NullPointerException if the target is {@code null}.
      */
     @Override
+    public boolean setComposingText(@NonNull CharSequence text,
+            int newCursorPosition, @Nullable TextAttribute textAttribute) {
+        return mTarget.setComposingText(text, newCursorPosition, textAttribute);
+    }
+
+    /**
+     * {@inheritDoc}
+     * @throws NullPointerException if the target is {@code null}.
+     */
+    @Override
     public boolean setComposingRegion(int start, int end) {
         return mTarget.setComposingRegion(start, end);
+    }
+
+    /**
+     * {@inheritDoc}
+     * @throws NullPointerException if the target is {@code null}.
+     */
+    @Override
+    public boolean setComposingRegion(int start, int end, @Nullable TextAttribute textAttribute) {
+        return mTarget.setComposingRegion(start, end, textAttribute);
     }
 
     /**
@@ -167,6 +198,16 @@ public class InputConnectionWrapper implements InputConnection {
     @Override
     public boolean commitText(CharSequence text, int newCursorPosition) {
         return mTarget.commitText(text, newCursorPosition);
+    }
+
+    /**
+     * {@inheritDoc}
+     * @throws NullPointerException if the target is {@code null}.
+     */
+    @Override
+    public boolean commitText(@NonNull CharSequence text, int newCursorPosition,
+            @Nullable TextAttribute textAttribute) {
+        return mTarget.commitText(text, newCursorPosition, textAttribute);
     }
 
     /**
@@ -264,6 +305,15 @@ public class InputConnectionWrapper implements InputConnection {
      * @throws NullPointerException if the target is {@code null}.
      */
     @Override
+    public boolean performSpellCheck() {
+        return mTarget.performSpellCheck();
+    }
+
+    /**
+     * {@inheritDoc}
+     * @throws NullPointerException if the target is {@code null}.
+     */
+    @Override
     public boolean performPrivateCommand(String action, Bundle data) {
         return mTarget.performPrivateCommand(action, data);
     }
@@ -302,5 +352,14 @@ public class InputConnectionWrapper implements InputConnection {
     @Override
     public boolean commitContent(InputContentInfo inputContentInfo, int flags, Bundle opts) {
         return mTarget.commitContent(inputContentInfo, flags, opts);
+    }
+
+    /**
+     * {@inheritDoc}
+     * @throws NullPointerException if the target is {@code null}.
+     */
+    @Override
+    public boolean setImeConsumesInput(boolean imeConsumesInput) {
+        return mTarget.setImeConsumesInput(imeConsumesInput);
     }
 }

@@ -1,7 +1,9 @@
-package com.test.demo
+package cn.test.demo
 
-import android.support.v7.app.AppCompatActivity
+
 import android.os.Bundle
+import androidx.appcompat.app.AppCompatActivity
+import cn.test.demo.R
 
 class MainActivity : AppCompatActivity() {
 

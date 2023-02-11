@@ -18,6 +18,7 @@ package android.media;
 
 import android.graphics.ImageFormat;
 import android.graphics.PixelFormat;
+import android.hardware.HardwareBuffer;
 import android.media.Image.Plane;
 import android.util.Size;
 
@@ -36,8 +37,8 @@ class ImageUtils {
      * {@link android.graphics.PixelFormat PixelFormat} are supported by
      * ImageReader. When reading RGB data from a surface, the formats defined in
      * {@link android.graphics.PixelFormat PixelFormat} can be used; when
-     * reading YUV, JPEG or raw sensor data (for example, from the camera or video
-     * decoder), formats from {@link android.graphics.ImageFormat ImageFormat}
+     * reading YUV, JPEG, HEIC or raw sensor data (for example, from the camera
+     * or video decoder), formats from {@link android.graphics.ImageFormat ImageFormat}
      * are used.
      */
     public static int getNumPlanesForFormat(int format) {
@@ -45,6 +46,7 @@ class ImageUtils {
             case ImageFormat.YV12:
             case ImageFormat.YUV_420_888:
             case ImageFormat.NV21:
+            case ImageFormat.YCBCR_P010:
                 return 3;
             case ImageFormat.NV16:
                 return 2;
@@ -63,6 +65,9 @@ class ImageUtils {
             case ImageFormat.DEPTH16:
             case ImageFormat.DEPTH_POINT_CLOUD:
             case ImageFormat.RAW_DEPTH:
+            case ImageFormat.RAW_DEPTH10:
+            case ImageFormat.DEPTH_JPEG:
+            case ImageFormat.HEIC:
                 return 1;
             case ImageFormat.PRIVATE:
                 return 0;
@@ -72,6 +77,34 @@ class ImageUtils {
         }
     }
 
+    /**
+     * Only a subset of the formats defined in
+     * {@link android.graphics.HardwareBuffer.Format} constants are supported by ImageReader.
+     */
+    public static int getNumPlanesForHardwareBufferFormat(int hardwareBufferFormat) {
+        switch(hardwareBufferFormat) {
+            case HardwareBuffer.YCBCR_420_888:
+                return 3;
+            case HardwareBuffer.RGBA_8888:
+            case HardwareBuffer.RGBX_8888:
+            case HardwareBuffer.RGB_888:
+            case HardwareBuffer.RGB_565:
+            case HardwareBuffer.RGBA_FP16:
+            case HardwareBuffer.RGBA_1010102:
+            case HardwareBuffer.BLOB:
+            case HardwareBuffer.D_16:
+            case HardwareBuffer.D_24:
+            case HardwareBuffer.DS_24UI8:
+            case HardwareBuffer.D_FP32:
+            case HardwareBuffer.DS_FP32UI8:
+            case HardwareBuffer.S_UI8:
+                return 1;
+            default:
+                throw new UnsupportedOperationException(
+                    String.format("Invalid hardwareBuffer format specified %d",
+                            hardwareBufferFormat));
+        }
+    }
     /**
      * <p>
      * Copy source image data to destination Image.
@@ -107,6 +140,10 @@ class ImageUtils {
         if (src.getFormat() == ImageFormat.RAW_DEPTH) {
             throw new IllegalArgumentException(
                     "Copy of RAW_DEPTH format has not been implemented");
+        }
+        if (src.getFormat() == ImageFormat.RAW_DEPTH10) {
+            throw new IllegalArgumentException(
+                    "Copy of RAW_DEPTH10 format has not been implemented");
         }
         if (!(dst.getOwner() instanceof ImageWriter)) {
             throw new IllegalArgumentException("Destination image is not from ImageWriter. Only"
@@ -192,12 +229,15 @@ class ImageUtils {
             // 10x compression from RGB_888
             case ImageFormat.JPEG:
             case ImageFormat.DEPTH_POINT_CLOUD:
+            case ImageFormat.DEPTH_JPEG:
+            case ImageFormat.HEIC:
                 estimatedBytePerPixel = 0.3;
                 break;
             case ImageFormat.Y8:
                 estimatedBytePerPixel = 1.0;
                 break;
             case ImageFormat.RAW10:
+            case ImageFormat.RAW_DEPTH10:
                 estimatedBytePerPixel = 1.25;
                 break;
             case ImageFormat.YV12:
@@ -215,6 +255,7 @@ class ImageUtils {
             case ImageFormat.RAW_SENSOR:
             case ImageFormat.RAW_PRIVATE: // round estimate, real size is unknown
             case ImageFormat.DEPTH16:
+            case ImageFormat.YCBCR_P010:
                 estimatedBytePerPixel = 2.0;
                 break;
             case PixelFormat.RGB_888:
@@ -234,6 +275,7 @@ class ImageUtils {
 
     private static Size getEffectivePlaneSizeForImage(Image image, int planeIdx) {
         switch (image.getFormat()) {
+            case ImageFormat.YCBCR_P010:
             case ImageFormat.YV12:
             case ImageFormat.YUV_420_888:
             case ImageFormat.NV21:
@@ -260,6 +302,8 @@ class ImageUtils {
             case ImageFormat.RAW10:
             case ImageFormat.RAW12:
             case ImageFormat.RAW_DEPTH:
+            case ImageFormat.RAW_DEPTH10:
+            case ImageFormat.HEIC:
                 return new Size(image.getWidth(), image.getHeight());
             case ImageFormat.PRIVATE:
                 return new Size(0, 0);

@@ -10,16 +10,23 @@ import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.content.Context;
 import android.net.ConnectivityManager;
+import android.net.Network;
 import android.net.NetworkAgent;
+import android.net.NetworkAgentConfig;
 import android.net.NetworkCapabilities;
 import android.net.NetworkInfo;
 import android.net.NetworkInfo.DetailedState;
+import android.net.NetworkProvider;
 import android.os.Looper;
 import android.util.Log;
+
 import com.android.clockwork.common.DebugAssert;
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.util.IndentingPrintWriter;
+
+import java.net.InetAddress;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -47,17 +54,6 @@ public class ProxyNetworkAgent {
     @VisibleForTesting
     final HashMap<NetworkAgent, NetworkInfo> mNetworkAgents
         = new HashMap<NetworkAgent, NetworkInfo>();
-
-    /** Create a idle proxy network info object */
-    private static NetworkInfo IDLE_NETWORK;
-    static {
-        try {
-            IDLE_NETWORK = new NetworkInfo(ConnectivityManager.TYPE_PROXY, PROXY_NETWORK_SUBTYPE_ID,
-                    PROXY_NETWORK_TYPE_NAME, PROXY_NETWORK_SUBTYPE_NAME);
-        } catch (java.lang.NullPointerException e) {
-            Log.e(TAG, "Expected testing failure: " + e);
-        }
-    }
 
     /**
      * Callback executed when Connectivity Service deems a network agent unwanted()
@@ -93,7 +89,7 @@ public class ProxyNetworkAgent {
             if (mCurrentNetworkAgent != null) {
                 if (Log.isLoggable(TAG, Log.DEBUG)) {
                     Log.d(TAG, "Set network score for current network  agent:"
-                            + mCurrentNetworkAgent.netId + " score:" + mCurrentNetworkScore);
+                            + mCurrentNetworkAgent.getNetwork() + " score:" + mCurrentNetworkScore);
                 }
                 mCurrentNetworkAgent.sendNetworkScore(mCurrentNetworkScore);
             } else {
@@ -109,6 +105,14 @@ public class ProxyNetworkAgent {
             return mCurrentNetworkScore;
         } else {
             return 0;
+        }
+    }
+
+    protected void setDnsServers(List<InetAddress> dnsServers) {
+        DebugAssert.isMainThread();
+        mProxyLinkProperties.setDnsServers(dnsServers);
+        if (mCurrentNetworkAgent != null) {
+            mCurrentNetworkAgent.sendLinkProperties(mProxyLinkProperties.getLinkProperties());
         }
     }
 
@@ -157,39 +161,51 @@ public class ProxyNetworkAgent {
         DebugAssert.isMainThread();
         if (mCurrentNetworkAgent != null) {
             if (forceNewAgent) {
-                Log.w(TAG, "Network updated and overwriting current network agent since"
-                        + " one already existed ... previous agent:" + mCurrentNetworkAgent.netId);
+                Log.w(
+                        TAG,
+                        "Network updated and overwriting current network agent since"
+                                + " one already existed ... previous agent:"
+                                + mCurrentNetworkAgent.getNetwork());
             } else {
                 Log.w(TAG, "Network updated and re-using existing network agent:"
-                        + mCurrentNetworkAgent.netId);
+                        + mCurrentNetworkAgent.getNetwork());
                 return;
             }
         }
 
-        final NetworkInfo networkInfo = new NetworkInfo(IDLE_NETWORK);
-        networkInfo.setIsAvailable(true);
+        final NetworkInfo networkInfo =
+                new NetworkInfo(ConnectivityManager.TYPE_PROXY, PROXY_NETWORK_SUBTYPE_ID,
+                                PROXY_NETWORK_TYPE_NAME, PROXY_NETWORK_SUBTYPE_NAME);
         networkInfo.setDetailedState(DetailedState.CONNECTING, reason, companionName);
+        NetworkAgentConfig networkConfig = new NetworkAgentConfig.Builder()
+                    .setLegacyType(ConnectivityManager.TYPE_PROXY)
+                    .setLegacyTypeName(PROXY_NETWORK_TYPE_NAME)
+                    .setLegacySubType(PROXY_NETWORK_SUBTYPE_ID)
+                    .setLegacySubTypeName(PROXY_NETWORK_SUBTYPE_NAME)
+                    .build();
         mCurrentNetworkScore = networkScore;
         mCurrentNetworkAgent = new NetworkAgent(
-                Looper.getMainLooper(),
                 mContext,
+                Looper.getMainLooper(),
                 NETWORK_AGENT_NAME,
-                networkInfo,
                 mCapabilities,
                 mProxyLinkProperties.getLinkProperties(),
-                networkScore) {
+                networkScore,
+                networkConfig,
+                new NetworkProvider(mContext, Looper.getMainLooper(), TAG)) {
             @Override
-            protected void unwanted() {
+            public void onNetworkUnwanted() {
                 DebugAssert.isMainThread();
                 if (listener != null) {
-                    listener.onNetworkAgentUnwanted(this.netId);
+                    Network network = this.getNetwork();
+                    listener.onNetworkAgentUnwanted(network == null ? -1 : network.getNetId());
                 }
                 tearDownNetworkAgent(this);
             }
         };
         mNetworkAgents.put(mCurrentNetworkAgent, networkInfo);
         if (Log.isLoggable(TAG, Log.DEBUG)) {
-            Log.d(TAG, "Created network agent:" + mCurrentNetworkAgent.netId);
+            Log.d(TAG, "Created network agent:" + mCurrentNetworkAgent.getNetwork());
         }
     }
 
@@ -200,26 +216,32 @@ public class ProxyNetworkAgent {
         if (Log.isLoggable(TAG, Log.DEBUG)) {
             Log.d(TAG, "Proxy agent is not longer needed"
                     + "...tearing down network agent:"
-                    + unwantedNetworkAgent.netId);
+                    + unwantedNetworkAgent.getNetwork());
         }
         final NetworkInfo networkInfo = mNetworkAgents.get(unwantedNetworkAgent);
         if (networkInfo == null) {
             Log.e(TAG, "Unable to find unwanted network agent in map"
-                    + " network agent:" + unwantedNetworkAgent.netId);
+                    + " network agent:" + unwantedNetworkAgent.getNetwork());
             return;
         }
         mNetworkAgents.remove(unwantedNetworkAgent);
         if (unwantedNetworkAgent == mCurrentNetworkAgent) {
             if (Log.isLoggable(TAG, Log.DEBUG)) {
                 Log.d(TAG, "disconnected unwanted current network agent:"
-                        + mCurrentNetworkAgent.netId);
+                        + mCurrentNetworkAgent.getNetwork());
             }
             mCurrentNetworkAgent = null;
         } else {
             if (Log.isLoggable(TAG, Log.DEBUG)) {
-                Log.d(TAG, "unwanted network agent already torn down"
-                        + " unwanted:" + unwantedNetworkAgent.netId + " current:"
-                        + (mCurrentNetworkAgent == null ? "none" : mCurrentNetworkAgent.netId));
+                Log.d(
+                        TAG,
+                        "unwanted network agent already torn down"
+                                + " unwanted:"
+                                + unwantedNetworkAgent.getNetwork()
+                                + " current:"
+                                + (mCurrentNetworkAgent == null
+                                        ? "none"
+                                        : mCurrentNetworkAgent.getNetwork()));
             }
         }
     }
@@ -256,14 +278,18 @@ public class ProxyNetworkAgent {
             final NetworkInfo networkInfo = mNetworkAgents.get(mCurrentNetworkAgent);
             networkInfo.setDetailedState(detailedState, reason, extraInfo);
             mNetworkAgents.put(mCurrentNetworkAgent, networkInfo);
-            mCurrentNetworkAgent.sendNetworkInfo(networkInfo);
+            if (detailedState == DetailedState.CONNECTED) {
+                mCurrentNetworkAgent.markConnected();
+            } else if (detailedState == DetailedState.DISCONNECTED) {
+                mCurrentNetworkAgent.unregister();
+            }
         }
     }
 
     @AnyThread
     public void dump(@NonNull final IndentingPrintWriter ipw) {
         ipw.printPair("Network agent id", (mCurrentNetworkAgent == null)
-                ? "none" : mCurrentNetworkAgent.netId);
+                ? "none" : mCurrentNetworkAgent.getNetwork());
         ipw.printPair("score", (mCurrentNetworkAgent == null) ? 0 : mCurrentNetworkScore);
         ipw.println();
         ipw.increaseIndent();

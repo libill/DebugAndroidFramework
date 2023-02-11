@@ -35,7 +35,7 @@ import java.util.Objects;
 public class AnnouncementAggregator extends ICloseHandle.Stub {
     private static final String TAG = "BcRadio2Srv.AnnAggr";
 
-    private final Object mLock = new Object();
+    private final Object mLock;
     @NonNull private final IAnnouncementListener mListener;
     private final IBinder.DeathRecipient mDeathRecipient = new DeathRecipient();
 
@@ -45,8 +45,9 @@ public class AnnouncementAggregator extends ICloseHandle.Stub {
     @GuardedBy("mLock")
     private boolean mIsClosed = false;
 
-    public AnnouncementAggregator(@NonNull IAnnouncementListener listener) {
+    public AnnouncementAggregator(@NonNull IAnnouncementListener listener, @NonNull Object lock) {
         mListener = Objects.requireNonNull(listener);
+        mLock = Objects.requireNonNull(lock);
         try {
             listener.asBinder().linkToDeath(mDeathRecipient, 0);
         } catch (RemoteException ex) {
@@ -90,7 +91,11 @@ public class AnnouncementAggregator extends ICloseHandle.Stub {
             for (ModuleWatcher watcher : mModuleWatchers) {
                 combined.addAll(watcher.currentList);
             }
-            TunerCallback.dispatch(() -> mListener.onListUpdated(combined));
+            try {
+                mListener.onListUpdated(combined);
+            } catch (RemoteException ex) {
+                Slog.e(TAG, "mListener.onListUpdated() failed: ", ex);
+            }
         }
     }
 

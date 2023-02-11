@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2014 The Android Open Source Project
- * Copyright (c) 2005, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2005, 2015, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -37,6 +37,10 @@
  */
 
 package java.text;
+
+import android.icu.text.Normalizer2;
+
+import java.util.function.Supplier;
 
 /**
  * This class provides the method <code>normalize</code> which transforms Unicode
@@ -123,27 +127,27 @@ public final class Normalizer {
         /**
          * Canonical decomposition.
          */
-        NFD(android.icu.text.Normalizer.NFD),
+        NFD(Normalizer2::getNFDInstance),
 
         /**
          * Canonical decomposition, followed by canonical composition.
          */
-        NFC(android.icu.text.Normalizer.NFC),
+        NFC(Normalizer2::getNFCInstance),
 
         /**
          * Compatibility decomposition.
          */
-        NFKD(android.icu.text.Normalizer.NFKD),
+        NFKD(Normalizer2::getNFKDInstance),
 
         /**
          * Compatibility decomposition, followed by canonical composition.
          */
-        NFKC(android.icu.text.Normalizer.NFKC);
+        NFKC(Normalizer2::getNFKCInstance);
 
-        private final android.icu.text.Normalizer.Mode icuMode;
+        private final Supplier<Normalizer2> icuNormalizer;
 
-        Form(android.icu.text.Normalizer.Mode icuMode) {
-            this.icuMode = icuMode;
+        Form(Supplier<Normalizer2> icuNormalizer) {
+            this.icuNormalizer = icuNormalizer;
         }
     }
     // END Android-changed: remove static modifier and add mapping to equivalent ICU values.
@@ -164,7 +168,7 @@ public final class Normalizer {
      */
     public static String normalize(CharSequence src, Form form) {
         // Android-changed: Switched to ICU.
-        return android.icu.text.Normalizer.normalize(src.toString(), form.icuMode);
+        return form.icuNormalizer.get().normalize(src);
     }
 
     /**
@@ -182,6 +186,6 @@ public final class Normalizer {
      */
     public static boolean isNormalized(CharSequence src, Form form) {
         // Android-changed: Switched to ICU.
-        return android.icu.text.Normalizer.isNormalized(src.toString(), form.icuMode, 0);
+        return form.icuNormalizer.get().isNormalized(src);
     }
 }

@@ -17,6 +17,7 @@
 package android.widget;
 
 import android.content.Context;
+import android.graphics.Rect;
 import android.text.Editable;
 import android.text.Selection;
 import android.text.Spannable;
@@ -24,7 +25,6 @@ import android.text.TextUtils;
 import android.text.method.ArrowKeyMovementMethod;
 import android.text.method.MovementMethod;
 import android.util.AttributeSet;
-import android.view.accessibility.AccessibilityNodeInfo;
 
 /*
  * This is supposed to be a *very* thin veneer over TextView.
@@ -111,7 +111,7 @@ public class EditText extends TextView {
             return null;
         }
         if (text instanceof Editable) {
-            return (Editable) super.getText();
+            return (Editable) text;
         }
         super.setText(text, BufferType.EDITABLE);
         return (Editable) super.getText();
@@ -174,18 +174,15 @@ public class EditText extends TextView {
         return EditText.class.getName();
     }
 
-    /** @hide */
     @Override
-    protected boolean supportsAutoSizeText() {
-        return false;
+    protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+        super.onSizeChanged(w, h, oldw, oldh);
+        setHandwritingArea(new Rect(0, 0, w, h));
     }
 
     /** @hide */
     @Override
-    public void onInitializeAccessibilityNodeInfoInternal(AccessibilityNodeInfo info) {
-        super.onInitializeAccessibilityNodeInfoInternal(info);
-        if (isEnabled()) {
-            info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SET_TEXT);
-        }
+    protected boolean supportsAutoSizeText() {
+        return false;
     }
 }

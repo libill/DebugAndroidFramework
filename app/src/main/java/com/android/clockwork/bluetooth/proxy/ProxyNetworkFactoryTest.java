@@ -8,19 +8,18 @@ import static org.mockito.Mockito.verify;
 import android.content.Context;
 import android.net.NetworkCapabilities;
 import android.os.RemoteException;
-import com.android.clockwork.WearRobolectricTestRunner;
+
 import com.android.internal.util.IndentingPrintWriter;
+
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
-import org.robolectric.annotation.Config;
+import org.robolectric.RobolectricTestRunner;
 
 /** Test for {@link ProxyNetworkFactory} */
-@RunWith(WearRobolectricTestRunner.class)
-@Config(manifest = Config.NONE,
-        sdk = 26)
+@RunWith(RobolectricTestRunner.class)
 public class ProxyNetworkFactoryTest {
     private static final int NETWORK_SCORE = 123;
 

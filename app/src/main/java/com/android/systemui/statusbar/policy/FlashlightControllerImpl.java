@@ -16,7 +16,9 @@
 
 package com.android.systemui.statusbar.policy;
 
+import android.annotation.WorkerThread;
 import android.content.Context;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraCharacteristics;
@@ -24,19 +26,26 @@ import android.hardware.camera2.CameraManager;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Process;
+import android.provider.Settings;
+import android.provider.Settings.Secure;
 import android.text.TextUtils;
 import android.util.Log;
 
-import com.android.systemui.statusbar.policy.FlashlightController.FlashlightListener;
+import androidx.annotation.NonNull;
 
-import java.io.FileDescriptor;
+import com.android.systemui.dagger.SysUISingleton;
+import com.android.systemui.dump.DumpManager;
+
 import java.io.PrintWriter;
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 
+import javax.inject.Inject;
+
 /**
  * Manages the flashlight.
  */
+@SysUISingleton
 public class FlashlightControllerImpl implements FlashlightController {
 
     private static final String TAG = "FlashlightController";
@@ -45,6 +54,9 @@ public class FlashlightControllerImpl implements FlashlightController {
     private static final int DISPATCH_ERROR = 0;
     private static final int DISPATCH_CHANGED = 1;
     private static final int DISPATCH_AVAILABILITY_CHANGED = 2;
+
+    private static final String ACTION_FLASHLIGHT_CHANGED =
+        "com.android.settings.flashlight.action.FLASHLIGHT_CHANGED";
 
     private final CameraManager mCameraManager;
     private final Context mContext;
@@ -60,10 +72,12 @@ public class FlashlightControllerImpl implements FlashlightController {
     private String mCameraId;
     private boolean mTorchAvailable;
 
-    public FlashlightControllerImpl(Context context) {
+    @Inject
+    public FlashlightControllerImpl(Context context, DumpManager dumpManager) {
         mContext = context;
         mCameraManager = (CameraManager) mContext.getSystemService(Context.CAMERA_SERVICE);
 
+        dumpManager.registerDumpable(getClass().getSimpleName(), this);
         tryInitCamera();
     }
 
@@ -114,7 +128,8 @@ public class FlashlightControllerImpl implements FlashlightController {
         return mTorchAvailable;
     }
 
-    public void addCallback(FlashlightListener l) {
+    @Override
+    public void addCallback(@NonNull FlashlightListener l) {
         synchronized (mListeners) {
             if (mCameraId == null) {
                 tryInitCamera();
@@ -126,7 +141,8 @@ public class FlashlightControllerImpl implements FlashlightController {
         }
     }
 
-    public void removeCallback(FlashlightListener l) {
+    @Override
+    public void removeCallback(@NonNull FlashlightListener l) {
         synchronized (mListeners) {
             cleanUpListenersLocked(l);
         }
@@ -203,17 +219,27 @@ public class FlashlightControllerImpl implements FlashlightController {
             new CameraManager.TorchCallback() {
 
         @Override
+        @WorkerThread
         public void onTorchModeUnavailable(String cameraId) {
             if (TextUtils.equals(cameraId, mCameraId)) {
                 setCameraAvailable(false);
+                Settings.Secure.putInt(
+                    mContext.getContentResolver(), Settings.Secure.FLASHLIGHT_AVAILABLE, 0);
+
             }
         }
 
         @Override
+        @WorkerThread
         public void onTorchModeChanged(String cameraId, boolean enabled) {
             if (TextUtils.equals(cameraId, mCameraId)) {
                 setCameraAvailable(true);
                 setTorchMode(enabled);
+                Settings.Secure.putInt(
+                    mContext.getContentResolver(), Settings.Secure.FLASHLIGHT_AVAILABLE, 1);
+                Settings.Secure.putInt(
+                    mContext.getContentResolver(), Secure.FLASHLIGHT_ENABLED, enabled ? 1 : 0);
+                mContext.sendBroadcast(new Intent(ACTION_FLASHLIGHT_CHANGED));
             }
         }
 
@@ -242,7 +268,7 @@ public class FlashlightControllerImpl implements FlashlightController {
         }
     };
 
-    public void dump(FileDescriptor fd, PrintWriter pw, String[] args) {
+    public void dump(PrintWriter pw, String[] args) {
         pw.println("FlashlightController state:");
 
         pw.print("  mCameraId=");

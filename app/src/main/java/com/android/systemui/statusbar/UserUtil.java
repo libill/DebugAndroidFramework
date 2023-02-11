@@ -16,12 +16,12 @@
 
 package com.android.systemui.statusbar;
 
-import com.android.systemui.statusbar.phone.SystemUIDialog;
-import com.android.systemui.statusbar.policy.UserSwitcherController;
 import android.content.Context;
 import android.content.DialogInterface;
 
 import com.android.systemui.R;
+import com.android.systemui.statusbar.phone.SystemUIDialog;
+import com.android.systemui.statusbar.policy.UserSwitcherController;
 
 public class UserUtil {
     public static void deleteUserWithPrompt(Context context, int userId,
@@ -40,7 +40,7 @@ public class UserUtil {
             super(context);
             setTitle(R.string.user_remove_user_title);
             setMessage(context.getString(R.string.user_remove_user_message));
-            setButton(DialogInterface.BUTTON_NEGATIVE,
+            setButton(DialogInterface.BUTTON_NEUTRAL,
                     context.getString(android.R.string.cancel), this);
             setButton(DialogInterface.BUTTON_POSITIVE,
                     context.getString(R.string.user_remove_user_remove), this);
@@ -51,7 +51,7 @@ public class UserUtil {
 
         @Override
         public void onClick(DialogInterface dialog, int which) {
-            if (which == BUTTON_NEGATIVE) {
+            if (which == BUTTON_NEUTRAL) {
                 cancel();
             } else {
                 dismiss();

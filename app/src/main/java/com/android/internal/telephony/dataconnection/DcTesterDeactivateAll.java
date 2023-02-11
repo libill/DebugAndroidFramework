@@ -20,11 +20,11 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
-import android.os.Build;
 import android.os.Handler;
-import android.telephony.Rlog;
 
 import com.android.internal.telephony.Phone;
+import com.android.internal.telephony.util.TelephonyUtils;
+import com.android.telephony.Rlog;
 
 /**
  * To bring down all DC's send the following intent:
@@ -69,7 +69,7 @@ public class DcTesterDeactivateAll {
         mPhone = phone;
         mDcc = dcc;
 
-        if (Build.IS_DEBUGGABLE) {
+        if (TelephonyUtils.IS_DEBUGGABLE) {
             IntentFilter filter = new IntentFilter();
 
             filter.addAction(sActionDcTesterDeactivateAll);
@@ -78,12 +78,13 @@ public class DcTesterDeactivateAll {
             filter.addAction(mPhone.getActionDetached());
             log("register for intent action=" + mPhone.getActionDetached());
 
-            phone.getContext().registerReceiver(sIntentReceiver, filter, null, handler);
+            phone.getContext().registerReceiver(sIntentReceiver, filter, null, handler,
+                    Context.RECEIVER_EXPORTED);
         }
     }
 
     void dispose() {
-        if (Build.IS_DEBUGGABLE) {
+        if (TelephonyUtils.IS_DEBUGGABLE) {
             mPhone.getContext().unregisterReceiver(sIntentReceiver);
         }
     }

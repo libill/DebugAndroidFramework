@@ -16,6 +16,9 @@
 
 package com.android.internal.util;
 
+import android.compat.annotation.UnsupportedAppUsage;
+import android.os.Build;
+
 /**
  * A helper class that aims to provide comparable growth performance to ArrayList, but on primitive
  * arrays. Common array operations are implemented for efficient use in dynamic containers.
@@ -37,6 +40,7 @@ public final class GrowingArrayUtils {
      * @return the array to which the element was appended. This may be different than the given
      *         array.
      */
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public static <T> T[] append(T[] array, int currentSize, T element) {
         assert currentSize <= array.length;
 
@@ -54,6 +58,7 @@ public final class GrowingArrayUtils {
     /**
      * Primitive int version of {@link #append(Object[], int, Object)}.
      */
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public static int[] append(int[] array, int currentSize, int element) {
         assert currentSize <= array.length;
 

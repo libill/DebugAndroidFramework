@@ -12,7 +12,7 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
 import org.robolectric.RobolectricTestRunner;
-import org.robolectric.annotation.Config;
+import org.robolectric.RuntimeEnvironment;
 import org.robolectric.shadows.ShadowApplication;
 
 import static org.mockito.Mockito.anyInt;
@@ -22,7 +22,6 @@ import static org.mockito.Mockito.when;
 import static org.mockito.MockitoAnnotations.initMocks;
 
 @RunWith(RobolectricTestRunner.class)
-@Config(manifest = Config.NONE, sdk = 23)
 public class BluetoothScanModeEnforcerTest {
     final ShadowApplication shadowApplication = ShadowApplication.getInstance();
 
@@ -47,7 +46,7 @@ public class BluetoothScanModeEnforcerTest {
     public void setUp() {
         initMocks(this);
 
-        mContext = shadowApplication.getApplicationContext();
+        mContext = RuntimeEnvironment.application;
         mEnforcer = new BluetoothScanModeEnforcer(mContext, mockBtAdapter, mockCompanionTracker);
 
         when(mockBtAdapter.isEnabled()).thenReturn(true);

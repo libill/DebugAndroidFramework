@@ -18,7 +18,8 @@ package android.os;
 
 import android.annotation.IntDef;
 import android.annotation.NonNull;
-import android.os.MessageQueueProto;
+import android.annotation.TestApi;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.util.Log;
 import android.util.Printer;
 import android.util.SparseArray;
@@ -42,12 +43,16 @@ public final class MessageQueue {
     private static final boolean DEBUG = false;
 
     // True if the message queue can be quit.
+    @UnsupportedAppUsage
     private final boolean mQuitAllowed;
 
+    @UnsupportedAppUsage
     @SuppressWarnings("unused")
     private long mPtr; // used by native code
 
+    @UnsupportedAppUsage
     Message mMessages;
+    @UnsupportedAppUsage
     private final ArrayList<IdleHandler> mIdleHandlers = new ArrayList<IdleHandler>();
     private SparseArray<FileDescriptorRecord> mFileDescriptorRecords;
     private IdleHandler[] mPendingIdleHandlers;
@@ -58,10 +63,12 @@ public final class MessageQueue {
 
     // The next barrier token.
     // Barriers are indicated by messages with a null target whose arg1 field carries the token.
+    @UnsupportedAppUsage
     private int mNextBarrierToken;
 
     private native static long nativeInit();
     private native static void nativeDestroy(long ptr);
+    @UnsupportedAppUsage
     private native void nativePollOnce(long ptr, int timeoutMillis); /*non-static for callbacks*/
     private native static void nativeWake(long ptr);
     private native static boolean nativeIsPolling(long ptr);
@@ -259,6 +266,7 @@ public final class MessageQueue {
     }
 
     // Called from native code.
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     private int dispatchEvents(int fd, int events) {
         // Get the file descriptor record and any state that might change.
         final FileDescriptorRecord record;
@@ -307,6 +315,7 @@ public final class MessageQueue {
         return newWatchedEvents;
     }
 
+    @UnsupportedAppUsage
     Message next() {
         // Return here if the message loop has already quit and been disposed.
         // This can happen if the application tries to restart a looper after quit
@@ -458,6 +467,8 @@ public final class MessageQueue {
      *
      * @hide
      */
+    @UnsupportedAppUsage
+    @TestApi
     public int postSyncBarrier() {
         return postSyncBarrier(SystemClock.uptimeMillis());
     }
@@ -501,6 +512,8 @@ public final class MessageQueue {
      *
      * @hide
      */
+    @UnsupportedAppUsage
+    @TestApi
     public void removeSyncBarrier(int token) {
         // Remove a sync barrier token from the queue.
         // If the queue is no longer stalled by a barrier then wake it.
@@ -537,11 +550,12 @@ public final class MessageQueue {
         if (msg.target == null) {
             throw new IllegalArgumentException("Message must have a target.");
         }
-        if (msg.isInUse()) {
-            throw new IllegalStateException(msg + " This message is already in use.");
-        }
 
         synchronized (this) {
+            if (msg.isInUse()) {
+                throw new IllegalStateException(msg + " This message is already in use.");
+            }
+
             if (mQuitting) {
                 IllegalStateException e = new IllegalStateException(
                         msg.target + " sending message to a Handler on a dead thread");
@@ -604,6 +618,24 @@ public final class MessageQueue {
         }
     }
 
+    boolean hasEqualMessages(Handler h, int what, Object object) {
+        if (h == null) {
+            return false;
+        }
+
+        synchronized (this) {
+            Message p = mMessages;
+            while (p != null) {
+                if (p.target == h && p.what == what && (object == null || object.equals(p.obj))) {
+                    return true;
+                }
+                p = p.next;
+            }
+            return false;
+        }
+    }
+
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     boolean hasMessages(Handler h, Runnable r, Object object) {
         if (h == null) {
             return false;
@@ -672,6 +704,40 @@ public final class MessageQueue {
         }
     }
 
+    void removeEqualMessages(Handler h, int what, Object object) {
+        if (h == null) {
+            return;
+        }
+
+        synchronized (this) {
+            Message p = mMessages;
+
+            // Remove all messages at front.
+            while (p != null && p.target == h && p.what == what
+                   && (object == null || object.equals(p.obj))) {
+                Message n = p.next;
+                mMessages = n;
+                p.recycleUnchecked();
+                p = n;
+            }
+
+            // Remove all messages after front.
+            while (p != null) {
+                Message n = p.next;
+                if (n != null) {
+                    if (n.target == h && n.what == what
+                        && (object == null || object.equals(n.obj))) {
+                        Message nn = n.next;
+                        n.recycleUnchecked();
+                        p.next = nn;
+                        continue;
+                    }
+                }
+                p = n;
+            }
+        }
+    }
+
     void removeMessages(Handler h, Runnable r, Object object) {
         if (h == null || r == null) {
             return;
@@ -706,6 +772,41 @@ public final class MessageQueue {
         }
     }
 
+    void removeEqualMessages(Handler h, Runnable r, Object object) {
+        if (h == null || r == null) {
+            return;
+        }
+
+        synchronized (this) {
+            Message p = mMessages;
+
+            // Remove all messages at front.
+            while (p != null && p.target == h && p.callback == r
+                   && (object == null || object.equals(p.obj))) {
+                Message n = p.next;
+                mMessages = n;
+                p.recycleUnchecked();
+                p = n;
+            }
+
+            // Remove all messages after front.
+            while (p != null) {
+                Message n = p.next;
+                if (n != null) {
+                    if (n.target == h && n.callback == r
+                        && (object == null || object.equals(n.obj))) {
+                        Message nn = n.next;
+                        n.recycleUnchecked();
+                        p.next = nn;
+                        continue;
+                    }
+                }
+                p = n;
+            }
+        }
+    }
+
+
     void removeCallbacksAndMessages(Handler h, Object object) {
         if (h == null) {
             return;
@@ -728,6 +829,39 @@ public final class MessageQueue {
                 Message n = p.next;
                 if (n != null) {
                     if (n.target == h && (object == null || n.obj == object)) {
+                        Message nn = n.next;
+                        n.recycleUnchecked();
+                        p.next = nn;
+                        continue;
+                    }
+                }
+                p = n;
+            }
+        }
+    }
+
+    void removeCallbacksAndEqualMessages(Handler h, Object object) {
+        if (h == null) {
+            return;
+        }
+
+        synchronized (this) {
+            Message p = mMessages;
+
+            // Remove all messages at front.
+            while (p != null && p.target == h
+                    && (object == null || object.equals(p.obj))) {
+                Message n = p.next;
+                mMessages = n;
+                p.recycleUnchecked();
+                p = n;
+            }
+
+            // Remove all messages after front.
+            while (p != null) {
+                Message n = p.next;
+                if (n != null) {
+                    if (n.target == h && (object == null || object.equals(n.obj))) {
                         Message nn = n.next;
                         n.recycleUnchecked();
                         p.next = nn;
@@ -792,11 +926,11 @@ public final class MessageQueue {
         }
     }
 
-    void writeToProto(ProtoOutputStream proto, long fieldId) {
+    void dumpDebug(ProtoOutputStream proto, long fieldId) {
         final long messageQueueToken = proto.start(fieldId);
         synchronized (this) {
             for (Message msg = mMessages; msg != null; msg = msg.next) {
-                msg.writeToProto(proto, MessageQueueProto.MESSAGES);
+                msg.dumpDebug(proto, MessageQueueProto.MESSAGES);
             }
             proto.write(MessageQueueProto.IS_POLLING_LOCKED, isPollingLocked());
             proto.write(MessageQueueProto.IS_QUITTING, mQuitting);

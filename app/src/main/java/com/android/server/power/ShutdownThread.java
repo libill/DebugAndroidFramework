@@ -27,6 +27,7 @@ import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.pm.PackageManagerInternal;
 import android.media.AudioAttributes;
 import android.os.FileUtils;
 import android.os.Handler;
@@ -41,14 +42,15 @@ import android.os.Trace;
 import android.os.UserHandle;
 import android.os.UserManager;
 import android.os.Vibrator;
+import android.telephony.TelephonyManager;
 import android.util.ArrayMap;
 import android.util.Log;
+import android.util.Slog;
 import android.util.TimingsTraceLog;
 import android.view.WindowManager;
 
-import com.android.internal.telephony.ITelephony;
-import com.android.server.RescueParty;
 import com.android.server.LocalServices;
+import com.android.server.RescueParty;
 import com.android.server.pm.PackageManagerService;
 import com.android.server.statusbar.StatusBarManagerInternal;
 
@@ -63,10 +65,10 @@ public final class ShutdownThread extends Thread {
     private static final int ACTION_DONE_POLL_WAIT_MS = 500;
     private static final int RADIOS_STATE_POLL_SLEEP_MS = 100;
     // maximum time we wait for the shutdown broadcast before going on.
-    private static final int MAX_BROADCAST_TIME = 10*1000;
-    private static final int MAX_SHUTDOWN_WAIT_TIME = 20*1000;
-    private static final int MAX_RADIO_WAIT_TIME = 12*1000;
-    private static final int MAX_UNCRYPT_WAIT_TIME = 15*60*1000;
+    private static final int MAX_BROADCAST_TIME = 10 * 1000;
+    private static final int MAX_CHECK_POINTS_DUMP_WAIT_TIME = 10 * 1000;
+    private static final int MAX_RADIO_WAIT_TIME = 12 * 1000;
+    private static final int MAX_UNCRYPT_WAIT_TIME = 15 * 60 * 1000;
     // constants for progress bar. the values are roughly estimated based on timeout.
     private static final int BROADCAST_STOP_PERCENT = 2;
     private static final int ACTIVITY_MANAGER_STOP_PERCENT = 4;
@@ -104,8 +106,11 @@ public final class ShutdownThread extends Thread {
     // Metrics that will be reported to tron after reboot
     private static final ArrayMap<String, Long> TRON_METRICS = new ArrayMap<>();
 
-    // File to use for save metrics
+    // File to use for saving shutdown metrics
     private static final String METRICS_FILE_BASENAME = "/data/system/shutdown-metrics";
+    // File to use for saving shutdown check points
+    private static final String CHECK_POINTS_FILE_BASENAME =
+            "/data/system/shutdown-checkpoints/checkpoints";
 
     // Metrics names to be persisted in shutdown-metrics file
     private static String METRIC_SYSTEM_SERVER = "shutdown_system_server";
@@ -161,6 +166,10 @@ public final class ShutdownThread extends Thread {
             }
         }
 
+        // Add checkpoint for this shutdown attempt. The user might still cancel the dialog, but
+        // this point preserves the system trace of the trigger point of the ShutdownThread.
+        ShutdownCheckPoints.recordCheckPoint(/* reason= */ null);
+
         final int longPressBehavior = context.getResources().getInteger(
                         com.android.internal.R.integer.config_longPressOnPowerBehavior);
         final int resourceId = mRebootSafeMode
@@ -205,7 +214,7 @@ public final class ShutdownThread extends Thread {
         CloseDialogReceiver(Context context) {
             mContext = context;
             IntentFilter filter = new IntentFilter(Intent.ACTION_CLOSE_SYSTEM_DIALOGS);
-            context.registerReceiver(this, filter);
+            context.registerReceiver(this, filter, Context.RECEIVER_EXPORTED);
         }
 
         @Override
@@ -314,6 +323,8 @@ public final class ShutdownThread extends Thread {
                 pd.setTitle(context.getText(com.android.internal.R.string.power_off));
                 pd.setMessage(context.getText(com.android.internal.R.string.shutdown_progress));
                 pd.setIndeterminate(true);
+            } else if (showSysuiReboot()) {
+                return null;
             } else {
                 // Factory reset path. Set the dialog message accordingly.
                 pd.setTitle(context.getText(com.android.internal.R.string.reboot_to_reset_title));
@@ -419,6 +430,11 @@ public final class ShutdownThread extends Thread {
         metricShutdownStart();
         metricStarted(METRIC_SYSTEM_SERVER);
 
+        // Start dumping check points for this shutdown in a separate thread.
+        Thread dumpCheckPointsThread = ShutdownCheckPoints.newDumpThread(
+                new File(CHECK_POINTS_FILE_BASENAME));
+        dumpCheckPointsThread.start();
+
         BroadcastReceiver br = new BroadcastReceiver() {
             @Override public void onReceive(Context context, Intent intent) {
                 // We don't allow apps to cancel this, so ignore the result.
@@ -443,6 +459,15 @@ public final class ShutdownThread extends Thread {
         if (mRebootSafeMode) {
             SystemProperties.set(REBOOT_SAFEMODE_PROPERTY, "1");
         }
+
+        shutdownTimingLog.traceBegin("DumpPreRebootInfo");
+        try {
+            Slog.i(TAG, "Logging pre-reboot information...");
+            PreRebootLogger.log(mContext);
+        } catch (Exception e) {
+            Slog.e(TAG, "Failed to log pre-reboot information", e);
+        }
+        shutdownTimingLog.traceEnd(); // DumpPreRebootInfo
 
         metricStarted(METRIC_SEND_BROADCAST);
         shutdownTimingLog.traceBegin("SendShutdownBroadcast");
@@ -501,8 +526,7 @@ public final class ShutdownThread extends Thread {
         shutdownTimingLog.traceBegin("ShutdownPackageManager");
         metricStarted(METRIC_PM);
 
-        final PackageManagerService pm = (PackageManagerService)
-            ServiceManager.getService("package");
+        final PackageManagerInternal pm = LocalServices.getService(PackageManagerInternal.class);
         if (pm != null) {
             pm.shutdown();
         }
@@ -529,6 +553,14 @@ public final class ShutdownThread extends Thread {
             // done yet, trigger it now.
             uncrypt();
         }
+
+        // Wait for the check points dump thread to finish, or kill it if not finished in time.
+        shutdownTimingLog.traceBegin("ShutdownCheckPointsDumpWait");
+        try {
+            dumpCheckPointsThread.join(MAX_CHECK_POINTS_DUMP_WAIT_TIME);
+        } catch (InterruptedException ex) {
+        }
+        shutdownTimingLog.traceEnd(); // ShutdownCheckPointsDumpWait
 
         shutdownTimingLog.traceEnd(); // SystemServerShutdown
         metricEnded(METRIC_SYSTEM_SERVER);
@@ -584,19 +616,15 @@ public final class ShutdownThread extends Thread {
                 TimingsTraceLog shutdownTimingsTraceLog = newTimingsLog();
                 boolean radioOff;
 
-                final ITelephony phone =
-                        ITelephony.Stub.asInterface(ServiceManager.checkService("phone"));
+                TelephonyManager telephonyManager = mContext.getSystemService(
+                        TelephonyManager.class);
 
-                try {
-                    radioOff = phone == null || !phone.needMobileRadioShutdown();
-                    if (!radioOff) {
-                        Log.w(TAG, "Turning off cellular radios...");
-                        metricStarted(METRIC_RADIO);
-                        phone.shutdownMobileRadios();
-                    }
-                } catch (RemoteException ex) {
-                    Log.e(TAG, "RemoteException during radio shutdown", ex);
-                    radioOff = true;
+                radioOff = telephonyManager == null
+                        || !telephonyManager.isAnyRadioPoweredOn();
+                if (!radioOff) {
+                    Log.w(TAG, "Turning off cellular radios...");
+                    metricStarted(METRIC_RADIO);
+                    telephonyManager.shutdownAllRadios();
                 }
 
                 Log.i(TAG, "Waiting for Radio...");
@@ -611,12 +639,7 @@ public final class ShutdownThread extends Thread {
                     }
 
                     if (!radioOff) {
-                        try {
-                            radioOff = !phone.needMobileRadioShutdown();
-                        } catch (RemoteException ex) {
-                            Log.e(TAG, "RemoteException during radio shutdown", ex);
-                            radioOff = true;
-                        }
+                        radioOff = !telephonyManager.isAnyRadioPoweredOn();
                         if (radioOff) {
                             Log.i(TAG, "Radio turned off.");
                             metricEnded(METRIC_RADIO);

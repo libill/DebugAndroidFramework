@@ -14,6 +14,7 @@ import android.os.SystemClock;
 import android.os.UserHandle;
 import android.provider.Settings;
 import android.util.Log;
+
 import com.android.internal.util.IndentingPrintWriter;
 
 import java.text.SimpleDateFormat;
@@ -67,15 +68,26 @@ public class SimpleTimerWifiBackoff implements WifiBackoff {
         mWifiLogger = wifiLogger;
         mAlarmManager = context.getSystemService(AlarmManager.class);
 
-        mEnterBackoffIntent = PendingIntent.getBroadcastAsUser(context, 0,
-                new Intent(ACTION_ENTER_BACKOFF), 0, UserHandle.SYSTEM);
-        mExitBackoffIntent = PendingIntent.getBroadcastAsUser(context, 0,
-                new Intent(ACTION_EXIT_BACKOFF), 0, UserHandle.SYSTEM);
+        mEnterBackoffIntent =
+                PendingIntent.getBroadcastAsUser(
+                        context,
+                        0,
+                        new Intent(ACTION_ENTER_BACKOFF),
+                        PendingIntent.FLAG_IMMUTABLE,
+                        UserHandle.SYSTEM);
+        mExitBackoffIntent =
+                PendingIntent.getBroadcastAsUser(
+                        context,
+                        0,
+                        new Intent(ACTION_EXIT_BACKOFF),
+                        PendingIntent.FLAG_IMMUTABLE,
+                        UserHandle.SYSTEM);
 
         IntentFilter intent = new IntentFilter();
         intent.addAction(ACTION_ENTER_BACKOFF);
         intent.addAction(ACTION_EXIT_BACKOFF);
-        context.registerReceiver(mAlarmReceiver, intent);
+        context.registerReceiver(mAlarmReceiver, intent,
+                Context.RECEIVER_NOT_EXPORTED);
 
         WifiBackoffSettingsObserver observer = new WifiBackoffSettingsObserver(
                 new Handler(Looper.getMainLooper()));

@@ -43,23 +43,28 @@ import android.util.Slog;
 import android.widget.Toast;
 
 import com.android.settingslib.bluetooth.BluetoothCallback;
+import com.android.settingslib.bluetooth.BluetoothUtils;
 import com.android.settingslib.bluetooth.CachedBluetoothDevice;
 import com.android.settingslib.bluetooth.CachedBluetoothDeviceManager;
 import com.android.settingslib.bluetooth.LocalBluetoothAdapter;
 import com.android.settingslib.bluetooth.LocalBluetoothManager;
 import com.android.settingslib.bluetooth.LocalBluetoothProfileManager;
-import com.android.settingslib.bluetooth.Utils;
+import com.android.systemui.CoreStartable;
+import com.android.systemui.Dependency;
 import com.android.systemui.R;
-import com.android.systemui.SystemUI;
+import com.android.systemui.dagger.SysUISingleton;
 
-import java.io.FileDescriptor;
 import java.io.PrintWriter;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.Set;
 
-public class KeyboardUI extends SystemUI implements InputManager.OnTabletModeChangedListener {
+import javax.inject.Inject;
+
+/** */
+@SysUISingleton
+public class KeyboardUI extends CoreStartable implements InputManager.OnTabletModeChangedListener {
     private static final String TAG = "KeyboardUI";
     private static final boolean DEBUG = false;
 
@@ -116,6 +121,11 @@ public class KeyboardUI extends SystemUI implements InputManager.OnTabletModeCha
 
     private int mState;
 
+    @Inject
+    public KeyboardUI(Context context) {
+        super(context);
+    }
+
     @Override
     public void start() {
         mContext = super.mContext;
@@ -130,7 +140,7 @@ public class KeyboardUI extends SystemUI implements InputManager.OnTabletModeCha
     }
 
     @Override
-    public void dump(FileDescriptor fd, PrintWriter pw, String[] args) {
+    public void dump(PrintWriter pw, String[] args) {
         pw.println("KeyboardUI:");
         pw.println("  mEnabled=" + mEnabled);
         pw.println("  mBootCompleted=" + mEnabled);
@@ -171,7 +181,7 @@ public class KeyboardUI extends SystemUI implements InputManager.OnTabletModeCha
             return;
         }
 
-        LocalBluetoothManager bluetoothManager = LocalBluetoothManager.getInstance(context, null);
+        LocalBluetoothManager bluetoothManager = Dependency.get(LocalBluetoothManager.class);
         if (bluetoothManager == null)  {
             if (DEBUG) {
                 Slog.e(TAG, "Failed to retrieve LocalBluetoothManager instance");
@@ -183,7 +193,7 @@ public class KeyboardUI extends SystemUI implements InputManager.OnTabletModeCha
         mLocalBluetoothAdapter = bluetoothManager.getBluetoothAdapter();
         mProfileManager = bluetoothManager.getProfileManager();
         bluetoothManager.getEventManager().registerCallback(new BluetoothCallbackHandler());
-        Utils.setErrorListener(new BluetoothErrorListener());
+        BluetoothUtils.setErrorListener(new BluetoothErrorListener());
 
         InputManager im = context.getSystemService(InputManager.class);
         im.registerOnTabletModeChangedListener(this, mHandler);
@@ -318,8 +328,7 @@ public class KeyboardUI extends SystemUI implements InputManager.OnTabletModeCha
     private CachedBluetoothDevice getCachedBluetoothDevice(BluetoothDevice d) {
         CachedBluetoothDevice cachedDevice = mCachedDeviceManager.findDevice(d);
         if (cachedDevice == null) {
-            cachedDevice = mCachedDeviceManager.addDevice(
-                    mLocalBluetoothAdapter, mProfileManager, d);
+            cachedDevice = mCachedDeviceManager.addDevice(d);
         }
         return cachedDevice;
     }
@@ -599,24 +608,9 @@ public class KeyboardUI extends SystemUI implements InputManager.OnTabletModeCha
             mHandler.obtainMessage(MSG_ON_DEVICE_BOND_STATE_CHANGED,
                     bondState, 0, cachedDevice).sendToTarget();
         }
-
-        @Override
-        public void onDeviceAdded(CachedBluetoothDevice cachedDevice) { }
-        @Override
-        public void onDeviceDeleted(CachedBluetoothDevice cachedDevice) { }
-        @Override
-        public void onScanningStateChanged(boolean started) { }
-        @Override
-        public void onConnectionStateChanged(CachedBluetoothDevice cachedDevice, int state) { }
-        @Override
-        public void onActiveDeviceChanged(CachedBluetoothDevice activeDevice,
-                                          int bluetoothProfile) { }
-
-        @Override
-        public void onAudioModeChanged() { }
     }
 
-    private final class BluetoothErrorListener implements Utils.ErrorListener {
+    private final class BluetoothErrorListener implements BluetoothUtils.ErrorListener {
         public void onShowError(Context context, String name, int messageResId) {
             mHandler.obtainMessage(MSG_SHOW_ERROR, messageResId, 0 /*unused*/,
                     new Pair<>(context, name)).sendToTarget();

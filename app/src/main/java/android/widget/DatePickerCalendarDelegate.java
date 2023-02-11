@@ -209,6 +209,7 @@ class DatePickerCalendarDelegate extends DatePicker.AbstractDatePickerDelegate {
             // Generate a non-activated color using the disabled alpha.
             final TypedArray ta = mContext.obtainStyledAttributes(ATTRS_DISABLED_ALPHA);
             final float disabledAlpha = ta.getFloat(0, 0.30f);
+            ta.recycle();
             defaultColor = multiplyAlphaComponent(activatedColor, disabledAlpha);
         }
 
@@ -259,6 +260,11 @@ class DatePickerCalendarDelegate extends DatePicker.AbstractDatePickerDelegate {
             }
 
             mCurrentDate.set(Calendar.YEAR, year);
+            if (mCurrentDate.compareTo(mMinDate) < 0) {
+                mCurrentDate.setTimeInMillis(mMinDate.getTimeInMillis());
+            } else if (mCurrentDate.compareTo(mMaxDate) > 0) {
+                mCurrentDate.setTimeInMillis(mMaxDate.getTimeInMillis());
+            }
             onDateChanged(true, true);
 
             // Automatically switch to day picker.
@@ -581,7 +587,7 @@ class DatePickerCalendarDelegate extends DatePicker.AbstractDatePickerDelegate {
         return DatePicker.class.getName();
     }
 
-    public static int getDaysInMonth(int month, int year) {
+    private static int getDaysInMonth(int month, int year) {
         switch (month) {
             case Calendar.JANUARY:
             case Calendar.MARCH:
@@ -597,7 +603,7 @@ class DatePickerCalendarDelegate extends DatePicker.AbstractDatePickerDelegate {
             case Calendar.NOVEMBER:
                 return 30;
             case Calendar.FEBRUARY:
-                return (year % 4 == 0) ? 29 : 28;
+                return (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)) ? 29 : 28;
             default:
                 throw new IllegalArgumentException("Invalid Month");
         }

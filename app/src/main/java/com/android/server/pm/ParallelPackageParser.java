@@ -16,13 +16,15 @@
 
 package com.android.server.pm;
 
-import android.content.pm.PackageParser;
+import static android.os.Trace.TRACE_TAG_PACKAGE_MANAGER;
+
 import android.os.Process;
 import android.os.Trace;
-import android.util.DisplayMetrics;
 
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.util.ConcurrentUtils;
+import com.android.server.pm.parsing.PackageParser2;
+import com.android.server.pm.parsing.pkg.ParsedPackage;
 
 import java.io.File;
 import java.util.List;
@@ -30,49 +32,52 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
 
-import static android.os.Trace.TRACE_TAG_PACKAGE_MANAGER;
-
 /**
- * Helper class for parallel parsing of packages using {@link PackageParser}.
+ * Helper class for parallel parsing of packages using {@link PackageParser2}.
  * <p>Parsing requests are processed by a thread-pool of {@link #MAX_THREADS}.
  * At any time, at most {@link #QUEUE_CAPACITY} results are kept in RAM</p>
  */
-class ParallelPackageParser implements AutoCloseable {
+class ParallelPackageParser {
 
-    private static final int QUEUE_CAPACITY = 10;
+    private static final int QUEUE_CAPACITY = 30;
     private static final int MAX_THREADS = 4;
 
-    private final String[] mSeparateProcesses;
-    private final boolean mOnlyCore;
-    private final DisplayMetrics mMetrics;
-    private final File mCacheDir;
-    private final PackageParser.Callback mPackageParserCallback;
     private volatile String mInterruptedInThread;
 
     private final BlockingQueue<ParseResult> mQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
 
-    private final ExecutorService mService = ConcurrentUtils.newFixedThreadPool(MAX_THREADS,
-            "package-parsing-thread", Process.THREAD_PRIORITY_FOREGROUND);
+    static ExecutorService makeExecutorService() {
+        return ConcurrentUtils.newFixedThreadPool(MAX_THREADS, "package-parsing-thread",
+                Process.THREAD_PRIORITY_FOREGROUND);
+    }
 
-    ParallelPackageParser(String[] separateProcesses, boolean onlyCoreApps,
-            DisplayMetrics metrics, File cacheDir, PackageParser.Callback callback) {
-        mSeparateProcesses = separateProcesses;
-        mOnlyCore = onlyCoreApps;
-        mMetrics = metrics;
-        mCacheDir = cacheDir;
-        mPackageParserCallback = callback;
+    private final PackageParser2 mPackageParser;
+
+    private final ExecutorService mExecutorService;
+
+    private final List<File> mFrameworkSplits;
+
+    ParallelPackageParser(PackageParser2 packageParser, ExecutorService executorService) {
+        this(packageParser, executorService, /* frameworkSplits= */ null);
+    }
+
+    ParallelPackageParser(PackageParser2 packageParser, ExecutorService executorService,
+            List<File> frameworkSplits) {
+        mPackageParser = packageParser;
+        mExecutorService = executorService;
+        mFrameworkSplits = frameworkSplits;
     }
 
     static class ParseResult {
 
-        PackageParser.Package pkg; // Parsed package
+        ParsedPackage parsedPackage; // Parsed package
         File scanFile; // File that was parsed
         Throwable throwable; // Set if an error occurs during parsing
 
         @Override
         public String toString() {
             return "ParseResult{" +
-                    "pkg=" + pkg +
+                    "parsedPackage=" + parsedPackage +
                     ", scanFile=" + scanFile +
                     ", throwable=" + throwable +
                     '}';
@@ -100,21 +105,15 @@ class ParallelPackageParser implements AutoCloseable {
     /**
      * Submits the file for parsing
      * @param scanFile file to scan
-     * @param parseFlags parse falgs
+     * @param parseFlags parse flags
      */
     public void submit(File scanFile, int parseFlags) {
-        mService.submit(() -> {
+        mExecutorService.submit(() -> {
             ParseResult pr = new ParseResult();
             Trace.traceBegin(TRACE_TAG_PACKAGE_MANAGER, "parallel parsePackage [" + scanFile + "]");
             try {
-                PackageParser pp = new PackageParser();
-                pp.setSeparateProcesses(mSeparateProcesses);
-                pp.setOnlyCoreApps(mOnlyCore);
-                pp.setDisplayMetrics(mMetrics);
-                pp.setCacheDir(mCacheDir);
-                pp.setCallback(mPackageParserCallback);
                 pr.scanFile = scanFile;
-                pr.pkg = parsePackage(pp, scanFile, parseFlags);
+                pr.parsedPackage = parsePackage(scanFile, parseFlags);
             } catch (Throwable e) {
                 pr.throwable = e;
             } finally {
@@ -133,17 +132,8 @@ class ParallelPackageParser implements AutoCloseable {
     }
 
     @VisibleForTesting
-    protected PackageParser.Package parsePackage(PackageParser packageParser, File scanFile,
-            int parseFlags) throws PackageParser.PackageParserException {
-        return packageParser.parsePackage(scanFile, parseFlags, true /* useCaches */);
-    }
-
-    @Override
-    public void close() {
-        List<Runnable> unfinishedTasks = mService.shutdownNow();
-        if (!unfinishedTasks.isEmpty()) {
-            throw new IllegalStateException("Not all tasks finished before calling close: "
-                    + unfinishedTasks);
-        }
+    protected ParsedPackage parsePackage(File scanFile, int parseFlags)
+            throws PackageManagerException {
+        return mPackageParser.parsePackage(scanFile, parseFlags, true, mFrameworkSplits);
     }
 }

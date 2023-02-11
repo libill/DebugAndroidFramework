@@ -11,8 +11,13 @@ public class WearProxyConstants {
     public static final String PROXY_NETWORK_TYPE_NAME = "COMPANION_PROXY";
     public static final String PROXY_NETWORK_SUBTYPE_NAME = "";
     public static final int PROXY_NETWORK_SUBTYPE_ID = 0;
-    public static final ParcelUuid PROXY_UUID =
+    public static final int PROXY_VERSION_V1 = 1;
+    public static final int PROXY_VERSION_V15 = 5; // v1.5
+    public static final int PROXY_VERSION_V2 = 20;
+    public static final ParcelUuid PROXY_UUID_V1 =
         ParcelUuid.fromString("fafbdd20-83f0-4389-addf-917ac9dae5b2");
+    public static final ParcelUuid PROXY_UUID_V2 =
+        ParcelUuid.fromString("7c2e6d2d-872f-417e-b9b6-57c3e3abb0c8");
 
     /** Reasons for sysproxy connection or disconnection events */
     public static final class Reason {
@@ -23,4 +28,3 @@ public class WearProxyConstants {
         public static final String SYSPROXY_DISCONNECTED = "Sysproxy Disconnected";
     }
 }
-

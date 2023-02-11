@@ -1,24 +1,11 @@
 package com.android.clockwork.wifi;
 
-import android.content.ContentResolver;
-import android.provider.Settings;
-
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.runner.RunWith;
-import org.junit.Test;
-
-import org.mockito.Matchers;
-import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
-import org.robolectric.RuntimeEnvironment;
-import org.robolectric.annotation.Config;
-import org.robolectric.RobolectricTestRunner;
-
 import static com.android.clockwork.wifi.WearWifiMediatorSettings.DISABLE_WIFI_MEDIATOR_KEY;
 import static com.android.clockwork.wifi.WearWifiMediatorSettings.ENABLE_WIFI_WHEN_CHARGING_KEY;
 import static com.android.clockwork.wifi.WearWifiMediatorSettings.HW_LOW_POWER_MODE_KEY;
 import static com.android.clockwork.wifi.WearWifiMediatorSettings.IN_WIFI_SETTINGS_KEY;
+import static com.android.clockwork.wifi.WearWifiMediatorSettings.WIFI_ON_BOOT_DELAY_MS_DEFAULT;
+import static com.android.clockwork.wifi.WearWifiMediatorSettings.WIFI_ON_BOOT_DELAY_MS_KEY;
 import static com.android.clockwork.wifi.WearWifiMediatorSettings.WIFI_SETTING_KEY;
 import static com.android.clockwork.wifi.WearWifiMediatorSettings.WIFI_SETTING_OFF;
 import static com.android.clockwork.wifi.WearWifiMediatorSettings.WIFI_SETTING_OFF_AIRPLANE;
@@ -28,12 +15,26 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.verify;
 
+import android.content.ContentResolver;
+import android.os.SystemProperties;
+import android.provider.Settings;
+
+import org.junit.Assert;
+import org.junit.Before;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.mockito.Matchers;
+import org.mockito.Mock;
+import org.mockito.MockitoAnnotations;
+import org.robolectric.RobolectricTestRunner;
+import org.robolectric.RuntimeEnvironment;
+
 @RunWith(RobolectricTestRunner.class)
-@Config(manifest = Config.NONE, sdk = 23)
 public class WearWifiMediatorSettingsTest {
     ContentResolver cr;
 
-    @Mock WearWifiMediatorSettings.Listener mockListener;
+    @Mock
+    WearWifiMediatorSettings.Listener mockListener;
     WearWifiMediatorSettings mWifiSettings;
 
     @Before
@@ -93,6 +94,10 @@ public class WearWifiMediatorSettingsTest {
 
         Settings.Global.putInt(cr, Settings.Global.WIFI_ON_WHEN_PROXY_DISCONNECTED, 0);
         Assert.assertFalse(mWifiSettings.getWifiOnWhenProxyDisconnected());
+
+        Assert.assertEquals(mWifiSettings.getWifiOnBootDelayMs(), WIFI_ON_BOOT_DELAY_MS_DEFAULT);
+        SystemProperties.set(WIFI_ON_BOOT_DELAY_MS_KEY, "123");
+        Assert.assertEquals(mWifiSettings.getWifiOnBootDelayMs(), 123);
     }
 
     @Test

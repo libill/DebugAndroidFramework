@@ -18,7 +18,6 @@ import android.annotation.Nullable;
 import android.content.Context;
 import android.content.res.Configuration;
 import android.content.res.TypedArray;
-import android.os.LocaleList;
 import android.util.AttributeSet;
 import android.view.LayoutInflater;
 import android.view.View;
@@ -87,7 +86,12 @@ public class AutoReinflateContainer extends FrameLayout implements
     }
 
     @Override
-    public void onOverlayChanged() {
+    public void onThemeChanged() {
+        inflateLayout();
+    }
+
+    @Override
+    public void onUiModeChanged() {
         inflateLayout();
     }
 

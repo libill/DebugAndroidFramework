@@ -11,21 +11,31 @@ import android.net.NetworkCapabilities;
 import android.net.wifi.WifiManager;
 import android.os.Binder;
 import android.os.Build;
-import android.os.PowerManager;
+import android.telephony.SubscriptionManager;
 import android.telephony.TelephonyManager;
+import android.telephony.euicc.EuiccManager;
+
 import com.android.clockwork.bluetooth.BluetoothLogger;
 import com.android.clockwork.bluetooth.BluetoothScanModeEnforcer;
 import com.android.clockwork.bluetooth.BluetoothShardRunner;
 import com.android.clockwork.bluetooth.CompanionTracker;
+import com.android.clockwork.bluetooth.DeviceInformationGattServer;
 import com.android.clockwork.bluetooth.WearBluetoothMediator;
+import com.android.clockwork.bluetooth.WearBluetoothMediatorSettings;
+import com.android.clockwork.bluetooth.proxy.ProxyGattServer;
 import com.android.clockwork.bluetooth.proxy.ProxyLinkProperties;
+import com.android.clockwork.bluetooth.proxy.ProxyPinger;
 import com.android.clockwork.bluetooth.proxy.ProxyServiceHelper;
 import com.android.clockwork.cellular.WearCellularMediator;
 import com.android.clockwork.cellular.WearCellularMediatorSettings;
 import com.android.clockwork.common.ActivityModeTracker;
-import com.android.clockwork.flags.UserAbsentRadiosOffObserver;
+import com.android.clockwork.common.CellOnlyMode;
+import com.android.clockwork.common.DeviceEnableSetting;
+import com.android.clockwork.flags.BooleanFlag;
+import com.android.clockwork.flags.ClockworkFlags;
 import com.android.clockwork.power.PowerTracker;
 import com.android.clockwork.power.TimeOnlyMode;
+import com.android.clockwork.power.WearPowerServiceInternal;
 import com.android.clockwork.wifi.SimpleTimerWifiBackoff;
 import com.android.clockwork.wifi.WearWifiMediator;
 import com.android.clockwork.wifi.WearWifiMediatorSettings;
@@ -33,6 +43,7 @@ import com.android.clockwork.wifi.WifiLogger;
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.util.IndentingPrintWriter;
 import com.android.server.SystemService;
+
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
 
@@ -52,11 +63,10 @@ public class WearConnectivityService extends SystemService {
     @VisibleForTesting static final String FEATURE_SIDEWINDER = "com.google.sidewinder";
 
     private WearConnectivityController mController;
-    private PowerTracker mPowerTracker;
     private BluetoothScanModeEnforcer mBtScanModeEnforcer;
     private WearNetworkObserver mWearNetworkObserver;
 
-    private UserAbsentRadiosOffObserver mUserAbsentRadiosOffObserver;
+    private BooleanFlag mUserAbsentRadiosOff;
 
     public WearConnectivityService(Context context) {
         super(context);
@@ -70,10 +80,16 @@ public class WearConnectivityService extends SystemService {
     @Override
     public void onBootPhase(int phase) {
         if (phase == com.android.server.SystemService.PHASE_SYSTEM_SERVICES_READY) {
-            mUserAbsentRadiosOffObserver =
-                new UserAbsentRadiosOffObserver(getContext().getContentResolver());
-            mPowerTracker = new PowerTracker(
-                    getContext(), getContext().getSystemService(PowerManager.class));
+            mUserAbsentRadiosOff =
+                ClockworkFlags.userAbsentRadiosOff(getContext().getContentResolver());
+
+            WearPowerServiceInternal powerService = getLocalService(WearPowerServiceInternal.class);
+
+            PowerTracker powerTracker = powerService.getPowerTracker();
+            TimeOnlyMode timeOnlyMode = powerService.getTimeOnlyMode();
+
+            DeviceEnableSetting deviceEnableSetting =
+                    new DeviceEnableSetting(getContext(), getContext().getContentResolver());
 
             BluetoothAdapter btAdapter = BluetoothAdapter.getDefaultAdapter();
             CompanionTracker companionTracker =
@@ -85,23 +101,34 @@ public class WearConnectivityService extends SystemService {
                 mBtScanModeEnforcer =
                         new BluetoothScanModeEnforcer(getContext(), btAdapter, companionTracker);
                 ProxyServiceHelper proxyServiceHelper = new ProxyServiceHelper(
-                        getContext(), new NetworkCapabilities(), new ProxyLinkProperties(
+                        getContext(), new NetworkCapabilities.Builder(), new ProxyLinkProperties(
                             new LinkProperties(), isLocalEditionDevice(getContext())));
                 BluetoothShardRunner btShardRunner =
                         new BluetoothShardRunner(getContext(), companionTracker,
                             proxyServiceHelper);
+                DeviceInformationGattServer deviceInformationServer =
+                    new DeviceInformationGattServer(getContext());
+                ProxyGattServer proxyGattServer = new ProxyGattServer(getContext());
+
                 btMediator = new WearBluetoothMediator(
                         getContext(),
                         getContext().getSystemService(AlarmManager.class),
+                        new WearBluetoothMediatorSettings(getContext().getContentResolver()),
                         btAdapter,
                         btLogger,
                         btShardRunner,
                         companionTracker,
-                        mPowerTracker,
-                        mUserAbsentRadiosOffObserver,
-                        new TimeOnlyMode(getContext().getContentResolver(), mPowerTracker));
+                        powerTracker,
+                        deviceEnableSetting,
+                        mUserAbsentRadiosOff,
+                        timeOnlyMode,
+                        deviceInformationServer,
+                        proxyGattServer,
+                        new ProxyPinger(proxyGattServer));
             }
 
+            WearConnectivityPackageManager wearConnectivityPackageManager =
+                    new WearConnectivityPackageManager(getContext());
             WearCellularMediator cellMediator = null;
             PackageManager packageManager = getContext().getPackageManager();
             // Don't mediate cell in emulator.  The emulator relies on cellular to be present
@@ -110,26 +137,42 @@ public class WearConnectivityService extends SystemService {
                     && packageManager.hasSystemFeature(PackageManager.FEATURE_TELEPHONY)) {
                 TelephonyManager telephonyManager =
                         getContext().getSystemService(TelephonyManager.class);
+                EuiccManager euiccManager =
+                        getContext().getSystemService(EuiccManager.class);
                 cellMediator = new WearCellularMediator(
                         getContext(),
+                        getContext().getSystemService(AlarmManager.class),
                         telephonyManager,
+                        euiccManager,
+                        getContext().getSystemService(SubscriptionManager.class),
                         new WearCellularMediatorSettings(
-                                getContext(), telephonyManager.getSimOperator()),
-                        mPowerTracker,
-                        mUserAbsentRadiosOffObserver);
+                                getContext(),
+                                isLocalEditionDevice(getContext()),
+                                telephonyManager.getSimOperator()),
+                        powerTracker,
+                        deviceEnableSetting,
+                        wearConnectivityPackageManager,
+                        mUserAbsentRadiosOff);
             }
 
-            WifiLogger wifiLogger = new WifiLogger();
-            WearWifiMediator wifiMediator = new WearWifiMediator(
-                    getContext(),
-                    getContext().getSystemService(AlarmManager.class),
-                    new WearWifiMediatorSettings(getContext().getContentResolver()),
-                    companionTracker,
-                    mPowerTracker,
-                    mUserAbsentRadiosOffObserver,
-                    new SimpleTimerWifiBackoff(getContext(), wifiLogger),
-                    getContext().getSystemService(WifiManager.class),
-                    wifiLogger);
+            WearWifiMediator wifiMediator = null;
+            WifiManager wifiManager = getContext().getSystemService(WifiManager.class);
+            if (wifiManager != null) {
+                WifiLogger wifiLogger = new WifiLogger();
+                wifiMediator = new WearWifiMediator(
+                        getContext(),
+                        getContext().getSystemService(AlarmManager.class),
+                        new WearWifiMediatorSettings(getContext().getContentResolver()),
+                        companionTracker,
+                        powerTracker,
+                        deviceEnableSetting,
+                        wearConnectivityPackageManager,
+                        mUserAbsentRadiosOff,
+                        new SimpleTimerWifiBackoff(getContext(), wifiLogger),
+                        wifiManager,
+                        wifiLogger);
+            }
+
             WearProxyNetworkAgent proxyNetworkAgent = new WearProxyNetworkAgent(
                     getContext().getSystemService(ConnectivityManager.class));
 
@@ -139,16 +182,17 @@ public class WearConnectivityService extends SystemService {
                     btMediator,
                     wifiMediator,
                     cellMediator,
+                    wearConnectivityPackageManager,
                     proxyNetworkAgent,
                     new ActivityModeTracker(getContext()),
-                    mPowerTracker);
-            mWearNetworkObserver = new WearNetworkObserver(getContext(), mController);
+                    new CellOnlyMode(getContext(), getContext().getContentResolver(), getContext().getSystemService(AlarmManager.class)));
+            mWearNetworkObserver = new WearNetworkObserver(
+                getContext(),
+                wearConnectivityPackageManager,
+                mController);
             mWearNetworkObserver.register();
         } else if (phase == com.android.server.SystemService.PHASE_BOOT_COMPLETED) {
-            mUserAbsentRadiosOffObserver.register();
-            // this ordering ensures that mPowerTracker is properly initialized
-            // before its dependent classes
-            mPowerTracker.onBootCompleted();
+            mUserAbsentRadiosOff.register();
             mController.onBootCompleted();
         }
     }

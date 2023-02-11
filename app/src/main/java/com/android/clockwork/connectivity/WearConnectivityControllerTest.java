@@ -1,12 +1,22 @@
 package com.android.clockwork.connectivity;
 
+import static org.mockito.Matchers.anyInt;
+import static org.mockito.Matchers.anyLong;
+import static org.mockito.Matchers.eq;
+import static org.mockito.Mockito.reset;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
+import static org.mockito.Mockito.when;
+
 import android.app.AlarmManager;
 import android.content.Intent;
+
 import com.android.clockwork.bluetooth.WearBluetoothMediator;
 import com.android.clockwork.cellular.WearCellularMediator;
 import com.android.clockwork.common.ActivityModeTracker;
-import com.android.clockwork.power.PowerTracker;
+import com.android.clockwork.common.CellOnlyMode;
 import com.android.clockwork.wifi.WearWifiMediator;
+
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
@@ -14,19 +24,10 @@ import org.junit.runner.RunWith;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 import org.robolectric.RobolectricTestRunner;
-import org.robolectric.annotation.Config;
+import org.robolectric.RuntimeEnvironment;
 import org.robolectric.shadows.ShadowApplication;
 
-import static org.mockito.Matchers.anyInt;
-import static org.mockito.Matchers.anyLong;
-import static org.mockito.Matchers.eq;
-import static org.mockito.Mockito.reset;
-import static org.mockito.Mockito.verifyNoMoreInteractions;
-import static org.mockito.Mockito.when;
-import static org.mockito.Mockito.verify;
-
 @RunWith(RobolectricTestRunner.class)
-@Config(manifest = Config.NONE, sdk = Config.NEWEST_SDK)
 public class WearConnectivityControllerTest {
     final ShadowApplication shadowApplication = ShadowApplication.getInstance();
 
@@ -35,33 +36,38 @@ public class WearConnectivityControllerTest {
     @Mock WearBluetoothMediator mockBtMediator;
     @Mock WearWifiMediator mockWifiMediator;
     @Mock WearCellularMediator mockCellMediator;
+    @Mock WearConnectivityPackageManager mockWearConnectivityPackageManager;
 
     @Mock WearProxyNetworkAgent mockProxyNetworkAgent;
 
     @Mock ActivityModeTracker mockActivityModeTracker;
-    @Mock PowerTracker mockPowerTracker;
+    @Mock CellOnlyMode mockCellOnlyMode;
 
     WearConnectivityController mController;
+
+    final boolean initialProxyConnectedState = true;
 
     @Before
     public void setup() {
         MockitoAnnotations.initMocks(this);
 
         mController = new WearConnectivityController(
-                shadowApplication.getApplicationContext(),
+                RuntimeEnvironment.application,
                 mockAlarmManager,
                 mockBtMediator,
                 mockWifiMediator,
                 mockCellMediator,
+                mockWearConnectivityPackageManager,
                 mockProxyNetworkAgent,
                 mockActivityModeTracker,
-                mockPowerTracker);
+                mockCellOnlyMode);
 
         verify(mockProxyNetworkAgent).addListener(mController);
         verify(mockActivityModeTracker).addListener(mController);
+        verify(mockCellOnlyMode).addListener(mController);
 
         // initial controller state
-        when(mockProxyNetworkAgent.isProxyConnected()).thenReturn(true);
+        when(mockProxyNetworkAgent.isProxyConnected()).thenReturn(initialProxyConnectedState);
         mController.onBootCompleted();
     }
 
@@ -70,8 +76,9 @@ public class WearConnectivityControllerTest {
         Assert.assertTrue(shadowApplication.hasReceiverForIntent(
                 new Intent(WearConnectivityController.ACTION_PROXY_STATUS_CHANGE)));
 
-        verify(mockWifiMediator).onBootCompleted(true);
-        verify(mockCellMediator).onBootCompleted(true);
+        verify(mockBtMediator).onBootCompleted();
+        verify(mockWifiMediator).onBootCompleted(initialProxyConnectedState);
+        verify(mockCellMediator).onBootCompleted(initialProxyConnectedState);
     }
 
     @Test
@@ -141,5 +148,20 @@ public class WearConnectivityControllerTest {
         verifyNoMoreInteractions(mockBtMediator);
 
         // TODO set up various radio matrix/configurations and test that they get toggled
+    }
+
+    @Test
+    public void testCellOnlyModeChanges() {
+        reset(mockWifiMediator, mockCellMediator, mockBtMediator);
+
+        mController.onCellOnlyModeChanged(true);
+        verify(mockBtMediator).updateCellOnlyMode(true);
+        verify(mockWifiMediator).updateCellOnlyMode(true);
+        verify(mockCellMediator).updateCellOnlyMode(true);
+
+        mController.onCellOnlyModeChanged(false);
+        verify(mockBtMediator).updateCellOnlyMode(false);
+        verify(mockWifiMediator).updateCellOnlyMode(false);
+        verify(mockCellMediator).updateCellOnlyMode(false);
     }
 }

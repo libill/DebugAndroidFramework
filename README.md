@@ -40,7 +40,9 @@
 
 ![](image/debug_source.jpg)
 
+七、重要提示：最新源代码更新至android-32
 
+![](image/android_33_debug.jpg)
 
 更多请参考[极客时间-Android开发高手课](https://time.geekbang.org/column/article/85425)
 

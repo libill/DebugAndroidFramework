@@ -16,9 +16,12 @@
 
 package com.android.server.audio;
 
+import android.annotation.IntDef;
 import android.util.Log;
 
 import java.io.PrintWriter;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.LinkedList;
@@ -60,7 +63,46 @@ public class AudioEventLogger {
          * @return the same instance of the event
          */
         public Event printLog(String tag) {
-            Log.i(tag, eventToString());
+            return printLog(ALOGI, tag);
+        }
+
+        /** @hide */
+        @IntDef(flag = false, value = {
+                ALOGI,
+                ALOGE,
+                ALOGW,
+                ALOGV }
+        )
+        @Retention(RetentionPolicy.SOURCE)
+        public @interface LogType {}
+
+        public static final int ALOGI = 0;
+        public static final int ALOGE = 1;
+        public static final int ALOGW = 2;
+        public static final int ALOGV = 3;
+
+        /**
+         * Same as {@link #printLog(String)} with a log type
+         * @param type one of {@link #ALOGI}, {@link #ALOGE}, {@link #ALOGV}
+         * @param tag
+         * @return
+         */
+        public Event printLog(@LogType int type, String tag) {
+            switch (type) {
+                case ALOGI:
+                    Log.i(tag, eventToString());
+                    break;
+                case ALOGE:
+                    Log.e(tag, eventToString());
+                    break;
+                case ALOGW:
+                    Log.w(tag, eventToString());
+                    break;
+                case ALOGV:
+                default:
+                    Log.v(tag, eventToString());
+                    break;
+            }
             return this;
         }
 
@@ -104,6 +146,27 @@ public class AudioEventLogger {
             mEvents.removeFirst();
         }
         mEvents.add(evt);
+    }
+
+    /**
+     * Add a string-based event to the log, and print it to logcat as info.
+     * @param msg the message for the logs
+     * @param tag the logcat tag to use
+     */
+    public synchronized void loglogi(String msg, String tag) {
+        final Event event = new StringEvent(msg);
+        log(event.printLog(tag));
+    }
+
+    /**
+     * Same as {@link #loglogi(String, String)} but specifying the logcat type
+     * @param msg the message for the logs
+     * @param logType the type of logcat entry
+     * @param tag the logcat tag to use
+     */
+    public synchronized void loglog(String msg, @Event.LogType int logType, String tag) {
+        final Event event = new StringEvent(msg);
+        log(event.printLog(logType, tag));
     }
 
     public synchronized void dump(PrintWriter pw) {

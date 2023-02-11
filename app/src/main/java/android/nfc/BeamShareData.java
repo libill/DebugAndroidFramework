@@ -42,18 +42,18 @@ public final class BeamShareData implements Parcelable {
         dest.writeInt(this.flags);
     }
 
-    public static final Parcelable.Creator<BeamShareData> CREATOR =
+    public static final @android.annotation.NonNull Parcelable.Creator<BeamShareData> CREATOR =
             new Parcelable.Creator<BeamShareData>() {
         @Override
         public BeamShareData createFromParcel(Parcel source) {
             Uri[] uris = null;
-            NdefMessage msg = source.readParcelable(NdefMessage.class.getClassLoader());
+            NdefMessage msg = source.readParcelable(NdefMessage.class.getClassLoader(), android.nfc.NdefMessage.class);
             int numUris = source.readInt();
             if (numUris > 0) {
                 uris = new Uri[numUris];
                 source.readTypedArray(uris, Uri.CREATOR);
             }
-            UserHandle userHandle = source.readParcelable(UserHandle.class.getClassLoader());
+            UserHandle userHandle = source.readParcelable(UserHandle.class.getClassLoader(), android.os.UserHandle.class);
             int flags = source.readInt();
 
             return new BeamShareData(msg, uris, userHandle, flags);

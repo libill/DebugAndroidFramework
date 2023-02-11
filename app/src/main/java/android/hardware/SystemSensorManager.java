@@ -16,10 +16,18 @@
 
 package android.hardware;
 
+import static android.content.pm.PackageManager.PERMISSION_GRANTED;
+
+import android.compat.Compatibility;
+import android.compat.annotation.ChangeId;
+import android.compat.annotation.EnabledAfter;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.pm.ApplicationInfo;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.MemoryFile;
@@ -40,6 +48,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * Sensor manager implementation that communicates with the built-in
@@ -52,6 +61,19 @@ public class SystemSensorManager extends SensorManager {
     private static final boolean DEBUG_DYNAMIC_SENSOR = true;
     private static final int MIN_DIRECT_CHANNEL_BUFFER_SIZE = 104;
     private static final int MAX_LISTENER_COUNT = 128;
+    private static final int CAPPED_SAMPLING_PERIOD_US = 5000;
+    private static final int CAPPED_SAMPLING_RATE_LEVEL = SensorDirectChannel.RATE_NORMAL;
+
+    private static final String HIGH_SAMPLING_RATE_SENSORS_PERMISSION =
+                                        "android.permission.HIGH_SAMPLING_RATE_SENSORS";
+    /**
+     * For apps targeting S and above, a SecurityException is thrown when they do not have
+     * HIGH_SAMPLING_RATE_SENSORS permission, run in debug mode, and request sampling rates that
+     * are faster than 200 Hz.
+     */
+    @ChangeId
+    @EnabledAfter(targetSdkVersion = Build.VERSION_CODES.R)
+    static final long CHANGE_ID_SAMPLING_RATE_SENSORS_PERMISSION = 136069189L;
 
     private static native void nativeClassInit();
     private static native long nativeCreate(String opPackageName);
@@ -96,8 +118,11 @@ public class SystemSensorManager extends SensorManager {
     // Looper associated with the context in which this instance was created.
     private final Looper mMainLooper;
     private final int mTargetSdkLevel;
+    private final boolean mIsPackageDebuggable;
     private final Context mContext;
     private final long mNativeInstance;
+
+    private Optional<Boolean> mHasHighSamplingRateSensorsPermission = Optional.empty();
 
     /** {@hide} */
     public SystemSensorManager(Context context, Looper mainLooper) {
@@ -109,9 +134,11 @@ public class SystemSensorManager extends SensorManager {
         }
 
         mMainLooper = mainLooper;
-        mTargetSdkLevel = context.getApplicationInfo().targetSdkVersion;
+        ApplicationInfo appInfo = context.getApplicationInfo();
+        mTargetSdkLevel = appInfo.targetSdkVersion;
         mContext = context;
         mNativeInstance = nativeCreate(context.getOpPackageName());
+        mIsPackageDebuggable = (0 != (appInfo.flags & ApplicationInfo.FLAG_DEBUGGABLE));
 
         // initialize the sensor list
         for (int index = 0;; ++index) {
@@ -121,7 +148,6 @@ public class SystemSensorManager extends SensorManager {
             mHandleToSensor.put(sensor.getHandle(), sensor);
         }
     }
-
 
     /** @hide */
     @Override
@@ -438,7 +464,8 @@ public class SystemSensorManager extends SensorManager {
 
             IntentFilter filter = new IntentFilter("dynamic_sensor_change");
             filter.addAction(Intent.ACTION_DYNAMIC_SENSOR_CHANGED);
-            mContext.registerReceiver(mDynamicSensorBroadcastReceiver, filter);
+            mContext.registerReceiver(mDynamicSensorBroadcastReceiver, filter,
+                    Context.RECEIVER_NOT_EXPORTED);
         }
     }
 
@@ -540,10 +567,19 @@ public class SystemSensorManager extends SensorManager {
         }
 
         int sensorHandle = (sensor == null) ? -1 : sensor.getHandle();
+        if (sensor != null
+                && isSensorInCappedSet(sensor.getType())
+                && rate > CAPPED_SAMPLING_RATE_LEVEL
+                && mIsPackageDebuggable
+                && !hasHighSamplingRateSensorsPermission()
+                && Compatibility.isChangeEnabled(CHANGE_ID_SAMPLING_RATE_SENSORS_PERMISSION)) {
+            throw new SecurityException("To use the sampling rate level " + rate
+                    + ", app needs to declare the normal permission"
+                    + " HIGH_SAMPLING_RATE_SENSORS.");
+        }
 
         int ret = nativeConfigDirectChannel(
                 mNativeInstance, channel.getNativeHandle(), sensorHandle, rate);
-
         if (rate == SensorDirectChannel.RATE_STOP) {
             return (ret == 0) ? 1 : 0;
         } else {
@@ -628,7 +664,7 @@ public class SystemSensorManager extends SensorManager {
     private abstract static class BaseEventQueue {
         private static native long nativeInitBaseEventQueue(long nativeManager,
                 WeakReference<BaseEventQueue> eventQWeak, MessageQueue msgQ,
-                String packageName, int mode, String opPackageName);
+                String packageName, int mode, String opPackageName, String attributionTag);
         private static native int nativeEnableSensor(long eventQ, int handle, int rateUs,
                 int maxBatchReportLatencyUs);
         private static native int nativeDisableSensor(long eventQ, int handle);
@@ -640,6 +676,7 @@ public class SystemSensorManager extends SensorManager {
         private long mNativeSensorEventQueue;
         private final SparseBooleanArray mActiveSensors = new SparseBooleanArray();
         protected final SparseIntArray mSensorAccuracies = new SparseIntArray();
+        protected final SparseIntArray mSensorDiscontinuityCounts = new SparseIntArray();
         private final CloseGuard mCloseGuard = CloseGuard.get();
         protected final SystemSensorManager mManager;
 
@@ -650,8 +687,9 @@ public class SystemSensorManager extends SensorManager {
             if (packageName == null) packageName = "";
             mNativeSensorEventQueue = nativeInitBaseEventQueue(manager.mNativeInstance,
                     new WeakReference<>(this), looper.getQueue(),
-                    packageName, mode, manager.mContext.getOpPackageName());
-            mCloseGuard.open("dispose");
+                    packageName, mode, manager.mContext.getOpPackageName(),
+                    manager.mContext.getAttributionTag());
+            mCloseGuard.open("BaseEventQueue.dispose");
             mManager = manager;
         }
 
@@ -743,6 +781,15 @@ public class SystemSensorManager extends SensorManager {
                 Sensor sensor, int rateUs, int maxBatchReportLatencyUs) {
             if (mNativeSensorEventQueue == 0) throw new NullPointerException();
             if (sensor == null) throw new NullPointerException();
+            if (mManager.isSensorInCappedSet(sensor.getType())
+                    && rateUs < CAPPED_SAMPLING_PERIOD_US
+                    && mManager.mIsPackageDebuggable
+                    && !mManager.hasHighSamplingRateSensorsPermission()
+                    && Compatibility.isChangeEnabled(CHANGE_ID_SAMPLING_RATE_SENSORS_PERMISSION)) {
+                throw new SecurityException("To use the sampling rate of " + rateUs
+                        + " microseconds, app needs to declare the normal permission"
+                        + " HIGH_SAMPLING_RATE_SENSORS.");
+            }
             return nativeEnableSensor(mNativeSensorEventQueue, sensor.getHandle(), rateUs,
                     maxBatchReportLatencyUs);
         }
@@ -758,10 +805,13 @@ public class SystemSensorManager extends SensorManager {
             if (sensor == null) throw new NullPointerException();
             return nativeDisableSensor(mNativeSensorEventQueue, sensor.getHandle());
         }
+        @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
         protected abstract void dispatchSensorEvent(int handle, float[] values, int accuracy,
                 long timestamp);
+        @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
         protected abstract void dispatchFlushCompleteEvent(int handle);
 
+        @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
         protected void dispatchAdditionalInfoEvent(
                 int handle, int type, int serial, float[] floatValues, int[] intValues) {
             // default implementation is do nothing
@@ -826,10 +876,21 @@ public class SystemSensorManager extends SensorManager {
 
             // call onAccuracyChanged() only if the value changes
             final int accuracy = mSensorAccuracies.get(handle);
-            if ((t.accuracy >= 0) && (accuracy != t.accuracy)) {
+            if (t.accuracy >= 0 && accuracy != t.accuracy) {
                 mSensorAccuracies.put(handle, t.accuracy);
                 mListener.onAccuracyChanged(t.sensor, t.accuracy);
             }
+
+            // Indicate if the discontinuity count changed
+            if (t.sensor.getType() == Sensor.TYPE_HEAD_TRACKER) {
+                final int lastCount = mSensorDiscontinuityCounts.get(handle);
+                final int curCount = Float.floatToIntBits(values[6]);
+                if (lastCount >= 0 && lastCount != curCount) {
+                    mSensorDiscontinuityCounts.put(handle, curCount);
+                    t.firstEventAfterDiscontinuity = true;
+                }
+            }
+
             mListener.onSensorChanged(t);
         }
 
@@ -964,5 +1025,32 @@ public class SystemSensorManager extends SensorManager {
         return nativeSetOperationParameter(
                 mNativeInstance, handle,
                 parameter.type, parameter.floatValues, parameter.intValues) == 0;
+    }
+
+    /**
+     * Checks if a sensor should be capped according to HIGH_SAMPLING_RATE_SENSORS
+     * permission.
+     *
+     * This needs to be kept in sync with the list defined on the native side
+     * in frameworks/native/services/sensorservice/SensorService.cpp
+     */
+    private boolean isSensorInCappedSet(int sensorType) {
+        return (sensorType == Sensor.TYPE_ACCELEROMETER
+                || sensorType == Sensor.TYPE_ACCELEROMETER_UNCALIBRATED
+                || sensorType == Sensor.TYPE_GYROSCOPE
+                || sensorType == Sensor.TYPE_GYROSCOPE_UNCALIBRATED
+                || sensorType == Sensor.TYPE_MAGNETIC_FIELD
+                || sensorType == Sensor.TYPE_MAGNETIC_FIELD_UNCALIBRATED);
+    }
+
+    private boolean hasHighSamplingRateSensorsPermission() {
+        if (!mHasHighSamplingRateSensorsPermission.isPresent()) {
+            boolean granted = mContext.getPackageManager().checkPermission(
+                    HIGH_SAMPLING_RATE_SENSORS_PERMISSION,
+                    mContext.getApplicationInfo().packageName) == PERMISSION_GRANTED;
+            mHasHighSamplingRateSensorsPermission = Optional.of(granted);
+        }
+
+        return mHasHighSamplingRateSensorsPermission.get();
     }
 }

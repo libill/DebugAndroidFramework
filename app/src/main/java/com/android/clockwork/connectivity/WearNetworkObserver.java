@@ -7,8 +7,10 @@ import android.net.NetworkRequest;
 import android.os.Looper;
 import android.util.Log;
 import android.util.SparseArray;
-import com.android.internal.util.IndentingPrintWriter;
+
 import com.android.clockwork.common.DebugAssert;
+import com.android.internal.annotations.VisibleForTesting;
+import com.android.internal.util.IndentingPrintWriter;
 
 import java.util.Locale;
 
@@ -25,7 +27,8 @@ public class WearNetworkObserver extends NetworkFactory {
 
     // At its best performance, Bluetooth proxy provides 200kbps of bandwidth, so any request
     // for a bandwidth higher than this is considered "high bandwidth".
-    private static final int HIGH_BANDWIDTH_KBPS = 200 * 1024;
+    @VisibleForTesting
+    static final int HIGH_BANDWIDTH_KBPS = 200 * 1024;
 
     public interface Listener {
         void onUnmeteredRequestsChanged(int numUnmeteredRequests);
@@ -38,43 +41,55 @@ public class WearNetworkObserver extends NetworkFactory {
     private final SparseArray<NetworkRequest> mHighBandwidthRequests = new SparseArray<>();
     private final SparseArray<NetworkRequest> mWifiRequests = new SparseArray<>();
     private final SparseArray<NetworkRequest> mCellularRequests = new SparseArray<>();
+    private final WearConnectivityPackageManager mWearConnectivityPackageManager;
     private final Listener mListener;
 
-    public WearNetworkObserver(final Context context, Listener listener) {
+    public WearNetworkObserver(
+        final Context context,
+        WearConnectivityPackageManager wearConnectivityPackageManager,
+        Listener listener) {
         super(Looper.getMainLooper(), context, NETWORK_TYPE, null);
         DebugAssert.isMainThread();
+        mWearConnectivityPackageManager = wearConnectivityPackageManager;
         mListener = listener;
     }
 
-    @Override
-    protected void handleAddRequest(NetworkRequest req, int score) {
+    protected void handleAddRequest(NetworkRequest req, int score, int servingProviderId,
+		    int requestId, NetworkCapabilities networkCapabilities){
         DebugAssert.isMainThread();
-        verboseLog("WearNetworkObserver: handleAddRequest");
+        verboseLog("WearNetworkObserver: handleAddRequest " + req + " id " + servingProviderId);
 
-        if (mUnmeteredRequests.get(req.requestId) == null
-                && req.networkCapabilities.hasCapability(
+        if (mUnmeteredRequests.get(requestId) == null
+                && req.hasCapability(
                     NetworkCapabilities.NET_CAPABILITY_NOT_METERED)) {
-            mUnmeteredRequests.put(req.requestId, req);
+            mUnmeteredRequests.put(requestId, req);
             mListener.onUnmeteredRequestsChanged(mUnmeteredRequests.size());
         }
 
-        if (mHighBandwidthRequests.get(req.requestId) == null
-                && (req.networkCapabilities.getLinkDownstreamBandwidthKbps()
+        if (mHighBandwidthRequests.get(requestId) == null
+                && (networkCapabilities.getLinkDownstreamBandwidthKbps()
                         > HIGH_BANDWIDTH_KBPS)) {
-            mHighBandwidthRequests.put(req.requestId, req);
+            mHighBandwidthRequests.put(requestId, req);
             mListener.onHighBandwidthRequestsChanged(mHighBandwidthRequests.size());
         }
 
-        if (mWifiRequests.get(req.requestId) == null
-                && req.networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
-            mWifiRequests.put(req.requestId, req);
+        if (mWifiRequests.get(requestId) == null
+                && req.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+            mWifiRequests.put(requestId, req);
             mListener.onWifiRequestsChanged(mWifiRequests.size());
         }
 
-        if (mCellularRequests.get(req.requestId) == null
-                && req.networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) {
-            mCellularRequests.put(req.requestId, req);
-            mListener.onCellularRequestsChanged(mCellularRequests.size());
+        if (mCellularRequests.get(requestId) == null
+                && req.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) {
+            if (mWearConnectivityPackageManager.isSuppressedCellularRequestor(
+                    req.getRequestorPackageName())) {
+                verboseLog(String.format(Locale.US,
+                        "handleAddRequest - Suppressing cellular network request from %s",
+                        req.getRequestorPackageName()));
+            } else {
+                mCellularRequests.put(requestId, req);
+                mListener.onCellularRequestsChanged(mCellularRequests.size());
+            }
         }
 
         verboseLog(String.format(Locale.US,
@@ -85,31 +100,30 @@ public class WearNetworkObserver extends NetworkFactory {
                 mCellularRequests.size()));
     }
 
-    @Override
-    public void handleRemoveRequest(NetworkRequest req) {
+    protected void handleRemoveRequest(NetworkRequest req, int requestId) {
         DebugAssert.isMainThread();
         verboseLog("WearNetworkObserver: handleRemoveRequest");
-        NetworkRequest unmeteredReq = mUnmeteredRequests.get(req.requestId);
+        NetworkRequest unmeteredReq = mUnmeteredRequests.get(requestId);
         if (unmeteredReq != null) {
-            mUnmeteredRequests.remove(req.requestId);
+            mUnmeteredRequests.remove(requestId);
             mListener.onUnmeteredRequestsChanged(mUnmeteredRequests.size());
         }
 
-        NetworkRequest highBandwidthReq = mHighBandwidthRequests.get(req.requestId);
+        NetworkRequest highBandwidthReq = mHighBandwidthRequests.get(requestId);
         if (highBandwidthReq != null) {
-            mHighBandwidthRequests.remove(req.requestId);
+            mHighBandwidthRequests.remove(requestId);
             mListener.onHighBandwidthRequestsChanged(mHighBandwidthRequests.size());
         }
 
-        NetworkRequest wifiReq = mWifiRequests.get(req.requestId);
+        NetworkRequest wifiReq = mWifiRequests.get(requestId);
         if (wifiReq != null) {
-            mWifiRequests.remove(req.requestId);
+            mWifiRequests.remove(requestId);
             mListener.onWifiRequestsChanged(mWifiRequests.size());
         }
 
-        NetworkRequest cellReq = mCellularRequests.get(req.requestId);
+        NetworkRequest cellReq = mCellularRequests.get(requestId);
         if (cellReq != null) {
-            mCellularRequests.remove(req.requestId);
+            mCellularRequests.remove(requestId);
             mListener.onCellularRequestsChanged(mCellularRequests.size());
         }
 

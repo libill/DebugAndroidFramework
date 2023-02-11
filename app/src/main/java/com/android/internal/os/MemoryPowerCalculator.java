@@ -1,54 +1,61 @@
 package com.android.internal.os;
 
+import android.os.BatteryConsumer;
 import android.os.BatteryStats;
-import android.util.Log;
+import android.os.BatteryUsageStats;
+import android.os.BatteryUsageStatsQuery;
 import android.util.LongSparseArray;
 
 public class MemoryPowerCalculator extends PowerCalculator {
-
     public static final String TAG = "MemoryPowerCalculator";
-    private static final boolean DEBUG = BatteryStatsHelper.DEBUG;
-    private final double[] powerAverages;
+    private final UsageBasedPowerEstimator[] mPowerEstimators;
 
     public MemoryPowerCalculator(PowerProfile profile) {
         int numBuckets = profile.getNumElements(PowerProfile.POWER_MEMORY);
-        powerAverages = new double[numBuckets];
+        mPowerEstimators = new UsageBasedPowerEstimator[numBuckets];
         for (int i = 0; i < numBuckets; i++) {
-            powerAverages[i] = profile.getAveragePower(PowerProfile.POWER_MEMORY, i);
-            if (powerAverages[i] == 0 && DEBUG) {
-                Log.d(TAG, "Problem with PowerProfile. Received 0 value in MemoryPowerCalculator");
-            }
+            mPowerEstimators[i] = new UsageBasedPowerEstimator(
+                    profile.getAveragePower(PowerProfile.POWER_MEMORY, i));
         }
     }
 
     @Override
-    public void calculateApp(BatterySipper app, BatteryStats.Uid u, long rawRealtimeUs,
-            long rawUptimeUs, int statsType) {}
+    public boolean isPowerComponentSupported(@BatteryConsumer.PowerComponent int powerComponent) {
+        return powerComponent == BatteryConsumer.POWER_COMPONENT_MEMORY;
+    }
 
     @Override
-    public void calculateRemaining(BatterySipper app, BatteryStats stats, long rawRealtimeUs,
-            long rawUptimeUs, int statsType) {
-        double totalMah = 0;
-        long totalTimeMs = 0;
-        LongSparseArray<? extends BatteryStats.Timer> timers = stats.getKernelMemoryStats();
-        for (int i = 0; i < timers.size() && i < powerAverages.length; i++) {
-            double mAatRail = powerAverages[(int) timers.keyAt(i)];
-            long timeMs = timers.valueAt(i).getTotalTimeLocked(rawRealtimeUs, statsType);
-            double mAm = (mAatRail * timeMs) / (1000*60);
-            if(DEBUG) {
-                Log.d(TAG, "Calculating mAh for bucket " + timers.keyAt(i) + " while unplugged");
-                Log.d(TAG, "Converted power profile number from "
-                        + powerAverages[(int) timers.keyAt(i)] + " into " + mAatRail);
-                Log.d(TAG, "Calculated mAm " + mAm);
-            }
-            totalMah += mAm/60;
-            totalTimeMs += timeMs;
+    public void calculate(BatteryUsageStats.Builder builder, BatteryStats batteryStats,
+            long rawRealtimeUs, long rawUptimeUs, BatteryUsageStatsQuery query) {
+        final long durationMs = calculateDuration(batteryStats, rawRealtimeUs,
+                BatteryStats.STATS_SINCE_CHARGED);
+        final double powerMah = calculatePower(batteryStats, rawRealtimeUs,
+                BatteryStats.STATS_SINCE_CHARGED);
+        builder.getAggregateBatteryConsumerBuilder(
+                BatteryUsageStats.AGGREGATE_BATTERY_CONSUMER_SCOPE_DEVICE)
+                .setUsageDurationMillis(BatteryConsumer.POWER_COMPONENT_MEMORY, durationMs)
+                .setConsumedPower(BatteryConsumer.POWER_COMPONENT_MEMORY, powerMah);
+    }
+
+    private long calculateDuration(BatteryStats batteryStats, long rawRealtimeUs, int statsType) {
+        long usageDurationMs = 0;
+        LongSparseArray<? extends BatteryStats.Timer> timers = batteryStats.getKernelMemoryStats();
+        for (int i = 0; i < timers.size() && i < mPowerEstimators.length; i++) {
+            usageDurationMs += mPowerEstimators[i].calculateDuration(timers.valueAt(i),
+                    rawRealtimeUs, statsType);
         }
-        app.usagePowerMah = totalMah;
-        app.usageTimeMs = totalTimeMs;
-        if (DEBUG) {
-            Log.d(TAG, String.format("Calculated total mAh for memory %f while unplugged %d ",
-                    totalMah, totalTimeMs));
+        return usageDurationMs;
+    }
+
+    private double calculatePower(BatteryStats batteryStats, long rawRealtimeUs, int statsType) {
+        double powerMah = 0;
+        LongSparseArray<? extends BatteryStats.Timer> timers = batteryStats.getKernelMemoryStats();
+        for (int i = 0; i < timers.size() && i < mPowerEstimators.length; i++) {
+            UsageBasedPowerEstimator estimator = mPowerEstimators[(int) timers.keyAt(i)];
+            final long usageDurationMs =
+                    estimator.calculateDuration(timers.valueAt(i), rawRealtimeUs, statsType);
+            powerMah += estimator.calculatePower(usageDurationMs);
         }
+        return powerMah;
     }
 }

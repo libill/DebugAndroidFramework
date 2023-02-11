@@ -26,6 +26,7 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.UserHandle;
 import android.util.Log;
+import android.view.WindowManager;
 
 import com.android.internal.app.AlertActivity;
 import com.android.internal.app.AlertController;
@@ -47,6 +48,8 @@ public class UsbAccessoryUriActivity extends AlertActivity
 
     @Override
     public void onCreate(Bundle icicle) {
+       getWindow().addSystemFlags(
+                WindowManager.LayoutParams.SYSTEM_FLAG_HIDE_NON_SYSTEM_OVERLAY_WINDOWS);
        super.onCreate(icicle);
 
        Intent intent = getIntent();
@@ -54,7 +57,7 @@ public class UsbAccessoryUriActivity extends AlertActivity
         String uriString = intent.getStringExtra("uri");
         mUri = (uriString == null ? null : Uri.parse(uriString));
 
-        // sanity check before displaying dialog
+        // Exception check before displaying dialog
         if (mUri == null) {
             Log.e(TAG, "could not parse Uri " + uriString);
             finish();

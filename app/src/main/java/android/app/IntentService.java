@@ -16,8 +16,9 @@
 
 package android.app;
 
-import android.annotation.WorkerThread;
 import android.annotation.Nullable;
+import android.annotation.WorkerThread;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.content.Intent;
 import android.os.Handler;
 import android.os.HandlerThread;
@@ -26,8 +27,9 @@ import android.os.Looper;
 import android.os.Message;
 
 /**
- * IntentService is a base class for {@link Service}s that handle asynchronous
- * requests (expressed as {@link Intent}s) on demand.  Clients send requests
+ * IntentService is an extension of the {@link Service} component class that
+ * handles asynchronous requests (expressed as {@link Intent}s) on demand.
+ * Clients send requests
  * through {@link android.content.Context#startService(Intent)} calls; the
  * service is started as needed, handles each Intent in turn using a worker
  * thread, and stops itself when it runs out of work.
@@ -43,13 +45,6 @@ import android.os.Message;
  * long as necessary (and will not block the application's main loop), but
  * only one request will be processed at a time.
  *
- * <p class="note"><b>Note:</b> IntentService is subject to all the
- * <a href="/preview/features/background.html">background execution limits</a>
- * imposed with Android 8.0 (API level 26). In most cases, you are better off
- * using {@link android.support.v4.app.JobIntentService}, which uses jobs
- * instead of services when running on Android 8.0 or higher.
- * </p>
- *
  * <div class="special reference">
  * <h3>Developer Guides</h3>
  * <p>For a detailed discussion about how to create services, read the
@@ -57,11 +52,18 @@ import android.os.Message;
  * guide.</p>
  * </div>
  *
- * @see android.support.v4.app.JobIntentService
- * @see android.os.AsyncTask
+ * @see androidx.core.app.JobIntentService
+ *
+ * @deprecated IntentService is subject to all the
+ *   <a href="{@docRoot}about/versions/oreo/background.html">background execution limits</a>
+ *   imposed with Android 8.0 (API level 26). Consider using {@link androidx.work.WorkManager}
+ *   or {@link androidx.core.app.JobIntentService}, which uses jobs
+ *   instead of services when running on Android 8.0 or higher.
  */
+@Deprecated
 public abstract class IntentService extends Service {
     private volatile Looper mServiceLooper;
+    @UnsupportedAppUsage
     private volatile ServiceHandler mServiceHandler;
     private String mName;
     private boolean mRedelivery;

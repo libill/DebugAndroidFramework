@@ -30,17 +30,16 @@ class DragResizeMode {
     static final int DRAG_RESIZE_MODE_FREEFORM = 0;
 
     /**
-     * Mode for resizing the docked (and adjacent) stack: Client surface is fullscreen, but window
-     * is drawn at (0, 0), window manager is responsible for positioning the surface when draging.
+     * Mode for resizing the docked (and adjacent) root task: Client surface is fullscreen, but
+     * window is drawn at (0, 0), window manager is responsible for positioning the surface when
+     * dragging.
      */
     static final int DRAG_RESIZE_MODE_DOCKED_DIVIDER = 1;
 
-    static boolean isModeAllowedForStack(TaskStack stack, int mode) {
+    static boolean isModeAllowedForRootTask(Task rootTask, int mode) {
         switch (mode) {
             case DRAG_RESIZE_MODE_FREEFORM:
-                return stack.getWindowingMode() == WINDOWING_MODE_FREEFORM;
-            case DRAG_RESIZE_MODE_DOCKED_DIVIDER:
-                return stack.inSplitScreenWindowingMode();
+                return rootTask.getWindowingMode() == WINDOWING_MODE_FREEFORM;
             default:
                 return false;
         }

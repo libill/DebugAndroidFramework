@@ -10,7 +10,7 @@ import android.util.Log;
  */
 public class BluetoothLogger {
 
-    private static final String TAG = WearBluetoothConstants.LOG_TAG;
+    private static final String TAG = WearBluetoothSettings.LOG_TAG;
     private final int COMPANION_TYPE_CLASSIC = 1;
     private final int COMPANION_TYPE_LE = 2;
 

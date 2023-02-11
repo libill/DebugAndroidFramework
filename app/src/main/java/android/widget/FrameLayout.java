@@ -20,6 +20,7 @@ import android.annotation.AttrRes;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.annotation.StyleRes;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.content.Context;
 import android.content.res.TypedArray;
 import android.graphics.Rect;
@@ -30,6 +31,7 @@ import android.view.View;
 import android.view.ViewDebug;
 import android.view.ViewGroup;
 import android.view.ViewHierarchyEncoder;
+import android.view.inspector.InspectableProperty;
 import android.widget.RemoteViews.RemoteView;
 
 import com.android.internal.R;
@@ -58,18 +60,23 @@ public class FrameLayout extends ViewGroup {
     private static final int DEFAULT_CHILD_GRAVITY = Gravity.TOP | Gravity.START;
 
     @ViewDebug.ExportedProperty(category = "measurement")
+    @UnsupportedAppUsage
     boolean mMeasureAllChildren = false;
 
     @ViewDebug.ExportedProperty(category = "padding")
+    @UnsupportedAppUsage
     private int mForegroundPaddingLeft = 0;
 
     @ViewDebug.ExportedProperty(category = "padding")
+    @UnsupportedAppUsage
     private int mForegroundPaddingTop = 0;
 
     @ViewDebug.ExportedProperty(category = "padding")
+    @UnsupportedAppUsage
     private int mForegroundPaddingRight = 0;
 
     @ViewDebug.ExportedProperty(category = "padding")
+    @UnsupportedAppUsage
     private int mForegroundPaddingBottom = 0;
 
     private final ArrayList<View> mMatchParentChildren = new ArrayList<>(1);
@@ -93,6 +100,8 @@ public class FrameLayout extends ViewGroup {
 
         final TypedArray a = context.obtainStyledAttributes(
                 attrs, R.styleable.FrameLayout, defStyleAttr, defStyleRes);
+        saveAttributeDataForStyleable(context, R.styleable.FrameLayout,
+                attrs, a, defStyleAttr, defStyleRes);
 
         if (a.getBoolean(R.styleable.FrameLayout_measureAllChildren, false)) {
             setMeasureAllChildren(true);
@@ -361,6 +370,7 @@ public class FrameLayout extends ViewGroup {
      *
      * @return Whether all children are considered when measuring.
      */
+    @InspectableProperty
     public boolean getMeasureAllChildren() {
         return mMeasureAllChildren;
     }
@@ -433,6 +443,9 @@ public class FrameLayout extends ViewGroup {
          * @see android.view.Gravity
          * @attr ref android.R.styleable#FrameLayout_Layout_layout_gravity
          */
+        @InspectableProperty(
+                name = "layout_gravity",
+                valueType = InspectableProperty.ValueType.GRAVITY)
         public int gravity = UNSPECIFIED_GRAVITY;
 
         public LayoutParams(@NonNull Context c, @Nullable AttributeSet attrs) {
@@ -449,7 +462,7 @@ public class FrameLayout extends ViewGroup {
 
         /**
          * Creates a new set of layout parameters with the specified width, height
-         * and weight.
+         * and gravity.
          *
          * @param width the width, either {@link #MATCH_PARENT},
          *              {@link #WRAP_CONTENT} or a fixed size in pixels
